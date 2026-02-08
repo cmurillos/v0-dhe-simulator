@@ -21,7 +21,7 @@ Usage
     results = sim.solve(dt=1.0, t_save=10, t_on=0, t_off=3600, tf=7200, T_c=...)
 """
 
-from .dhe_simulation import DHE_simulation
+from .dhe_simulation import DHE_simulation, DHEResult
 
-__all__ = ["DHE_simulation"]
+__all__ = ["DHE_simulation", "DHEResult"]
 __version__ = "0.1.0"

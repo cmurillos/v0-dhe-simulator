@@ -1,46 +1,38 @@
 # =============================================================
 # DHE Simulator - Google Colab Quick Start
 # =============================================================
-# Copy this entire cell into a Colab notebook to run it.
-#
-# Prerequisites:
-#   - A CSV file with the 5-layer experimental profiles
-#     (upload it to Colab or mount Google Drive).
+# Copy each section below into separate Colab cells.
 # =============================================================
 
-# --- 1. Install the library directly from the GitHub repo ----
+# ---- Cell 1: Install ----------------------------------------
 # !pip install git+https://github.com/cmurillos/v0-dhe-simulator.git@thermal-simulation-library
 
-# --- 2. Import -----------------------------------------------
+# ---- Cell 2: Import -----------------------------------------
 import numpy as np
-from dhe_simulator import DHE_simulation
+from dhe_simulator import DHE_simulation, DHEResult
 
-# --- 3. Upload or specify CSV path ----------------------------
-# If your CSV is in Google Drive:
+# ---- Cell 3: Upload CSV -------------------------------------
+# Option A - upload manually:
+#   from google.colab import files
+#   uploaded = files.upload()
+#   csv_path = list(uploaded.keys())[0]
+#
+# Option B - Google Drive:
 #   from google.colab import drive
 #   drive.mount('/content/drive')
 #   csv_path = '/content/drive/MyDrive/perfiles_5_capas.csv'
-#
-# If you upload manually to Colab:
-#   from google.colab import files
-#   uploaded = files.upload()           # select your CSV
-#   csv_path = list(uploaded.keys())[0]
 
 csv_path = '/content/perfiles_5_capas.csv'   # <-- adjust as needed
 
-# --- 4. Define geometry (metres) ------------------------------
+# ---- Cell 4: Run simulation ---------------------------------
 R_min = 1.0
 R_max = 100.0
 z_min = 150
 z_max = 200
 
-# --- 5. Create simulation ------------------------------------
 dhe = DHE_simulation(csv_path, R_min, R_max, z_min, z_max)
-
-# --- 6. Define coolant temperature (constant 300 K here) ------
 T_c = lambda t, x, y, z: np.full_like(x, 300.0)
 
-# --- 7. Run ---------------------------------------------------
 res = dhe.solve(
     dt=20000,
     t_save=80000,
@@ -50,7 +42,22 @@ res = dhe.solve(
     T_c=T_c,
 )
 
-# --- 8. Inspect results ---------------------------------------
-print(f"Saved {len(res['t'])} snapshots")
-print(f"Time steps : {res['t']}")
-print(f"Final T min: {res['T'][-1].min():.2f}  max: {res['T'][-1].max():.2f}")
+print(res)
+# DHEResult(nodes=(N,3), elements=(M,4), boundary_faces=(F,3), snapshots=25)
+
+# ---- Cell 5: Save results -----------------------------------
+res.save('simulation_output.npz')
+print("Saved to simulation_output.npz")
+
+# ---- Cell 6: Load and inspect (can be done later) -----------
+loaded = DHEResult.load('simulation_output.npz')
+print(f"Nodes:     {loaded.nodes.shape}")
+print(f"Elements:  {loaded.elements.shape}")
+print(f"Faces:     {loaded.boundary_faces.shape}")
+print(f"Times:     {loaded.times.shape}  -> {loaded.times}")
+print(f"T matrix:  {loaded.T.shape}")
+print(f"T final:   min={loaded.T[-1].min():.2f}  max={loaded.T[-1].max():.2f}")
+
+# ---- Cell 7: Backward-compatible dict access -----------------
+# res['t'] and res['T'] still work as before:
+print(f"Snapshots via dict: {len(res['t'])}")
