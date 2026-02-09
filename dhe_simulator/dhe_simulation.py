@@ -179,10 +179,13 @@ class DHE_simulation():
             t_on=t_on,
             t_off=t_off)
 
+        # Flatten each snapshot to 1D — splu.solve may return (N,) or (N,1)
+        T_list = [np.asarray(Ti).ravel() for Ti in raw["T"]]
+
         return DHEResult(
             nodes=self.cylinder.nodes,
             elements=self.cylinder.elements,
             boundary_faces=self.cylinder.boundary_faces,
             times=raw["t"],
-            T_snapshots=np.array(raw["T"]),
+            T_snapshots=np.vstack(T_list),
         )
