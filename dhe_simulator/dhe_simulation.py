@@ -9,9 +9,6 @@ class DHEResult:
     """
     Container for DHE simulation results.
 
-    Stores the complete mesh geometry and the thermal field at every
-    saved time-step in a single, non-redundant object.
-
     Attributes
     ----------
     nodes : ndarray, shape (N_nodes, 3)
@@ -20,6 +17,10 @@ class DHEResult:
         Tetrahedral connectivity (node indices per tetrahedron).
     boundary_faces : ndarray, shape (N_faces, 3)
         Triangular boundary-face connectivity.
+    R_min : float
+        Inner (borehole) radius.
+    z_min : float
+        Top of the sealed base / bottom of the open annulus.
     T0_stable : ndarray, shape (N_nodes,)
         Stabilized initial temperature field.
     times : ndarray, shape (N_snapshots,)
@@ -28,15 +29,15 @@ class DHEResult:
         Temperature at every node for each saved snapshot.
     """
 
-    def __init__(self, nodes, elements, boundary_faces, T0_stable,
-                 times, T_snapshots):
+    def __init__(self, nodes, elements, boundary_faces,
+                 R_min, z_min, T0_stable, times, T_snapshots):
         self.nodes = np.asarray(nodes)
         self.elements = np.asarray(elements)
         self.boundary_faces = np.asarray(boundary_faces)
+        self.R_min = float(R_min)
+        self.z_min = float(z_min)
         self.T0_stable = np.asarray(T0_stable, dtype=float).ravel()
         self.times = np.asarray(times, dtype=float)
-        # Guarantee a homogeneous (N_snapshots, N_nodes) float array
-        # even if individual snapshots have inconsistent shapes.
         self.T = np.vstack([np.asarray(s, dtype=float).ravel()
                             for s in T_snapshots])
 
@@ -49,22 +50,14 @@ class DHEResult:
         raise KeyError(key)
 
     def save(self, path):
-        """
-        Save the full result to a compressed ``.npz`` file.
-
-        The file contains the keys: ``nodes``, ``elements``,
-        ``boundary_faces``, ``times``, ``T``.
-
-        Parameters
-        ----------
-        path : str
-            Output file path (e.g. ``'result.npz'``).
-        """
+        """Save the full result to a compressed .npz file."""
         np.savez_compressed(
             path,
             nodes=self.nodes,
             elements=self.elements,
             boundary_faces=self.boundary_faces,
+            R_min=np.array(self.R_min),
+            z_min=np.array(self.z_min),
             T0_stable=self.T0_stable,
             times=self.times,
             T=self.T,
@@ -72,56 +65,30 @@ class DHEResult:
 
     @staticmethod
     def load(path):
-        """
-        Load a DHEResult from a ``.npz`` file previously saved with
-        :meth:`save`.
-
-        Parameters
-        ----------
-        path : str
-            Path to the ``.npz`` file.
-
-        Returns
-        -------
-        DHEResult
-        """
+        """Load a DHEResult from a .npz file."""
         data = np.load(path)
         return DHEResult(
             nodes=data["nodes"],
             elements=data["elements"],
             boundary_faces=data["boundary_faces"],
+            R_min=float(data["R_min"]),
+            z_min=float(data["z_min"]),
             T0_stable=data["T0_stable"],
             times=data["times"],
             T_snapshots=data["T"],
         )
 
-    def delta(self, r_max, z_low, z_high):
+    def delta(self):
         """
-        Volume-weighted mean perturbation from the stable initial
-        condition inside a sub-cylinder:
+        Area-weighted mean perturbation on the borehole wall.
 
-        .. math::
+        Automatically identifies the boundary faces of the inner
+        cylindrical surface (r ~ R_min, z >= z_min), then computes
 
-            \\delta(t) =
-            \\frac{\\sum_e V_e \\, |\\bar T_{0,e} - \\bar T_e(t)|}
-                 {\\sum_e V_e}
+            delta(t) = sum_f A_f |T0_f - T_f(t)| / sum_f A_f
 
-        where the sum runs over tetrahedra whose centroid satisfies
-        ``r <= r_max`` and ``z_low <= z <= z_high``, *V_e* is the
-        tetrahedron volume, and the bar denotes the average over
-        its four vertices.
-
-        Both ``z_low`` and ``z_high`` are **absolute** z-coordinates
-        measured from z = 0.
-
-        Parameters
-        ----------
-        r_max : float
-            Maximum radial distance.
-        z_low : float
-            Lower z-bound (absolute coordinate).
-        z_high : float
-            Upper z-bound (absolute coordinate).
+        No parameters needed -- R_min and z_min come from the
+        simulation geometry.
 
         Returns
         -------
@@ -130,42 +97,43 @@ class DHEResult:
         """
         if self.T0_stable is None:
             raise RuntimeError(
-                "T0_stable not available. Run the simulation with "
-                "stabilization first."
+                "T0_stable not available. Run with stabilization first."
             )
 
-        pts = self.nodes[self.elements]                  # (N_tet, 4, 3)
-        centroids = pts.mean(axis=1)                     # (N_tet, 3)
-        r_c = np.sqrt(centroids[:, 0]**2 + centroids[:, 1]**2)
-        z_c = centroids[:, 2]
+        # --- identify borehole faces ---
+        face_pts = self.nodes[self.boundary_faces]       # (F, 3, 3)
+        r_verts = np.sqrt(face_pts[:, :, 0]**2 +
+                          face_pts[:, :, 1]**2)          # (F, 3)
+        z_verts = face_pts[:, :, 2]                      # (F, 3)
 
-        mask = (r_c <= r_max) & (z_c >= z_low) & (z_c <= z_high)
-        if not mask.any():
-            raise ValueError(
-                f"No elements found with r<={r_max} and "
-                f"{z_low}<=z<={z_high}."
+        tol_r = 0.5 * self.R_min
+        inner = (
+            np.all(np.abs(r_verts - self.R_min) < tol_r, axis=1) &
+            np.all(z_verts >= self.z_min - 1e-6, axis=1)
+        )
+        if not inner.any():
+            raise RuntimeError(
+                "No borehole faces found. Check R_min / z_min."
             )
 
-        sel = self.elements[mask]                        # (n, 4)
+        sel = self.boundary_faces[inner]                 # (n, 3)
 
-        # tetrahedron volumes  |det[v1,v2,v3]| / 6
-        v1 = pts[mask, 0] - pts[mask, 3]
-        v2 = pts[mask, 1] - pts[mask, 3]
-        v3 = pts[mask, 2] - pts[mask, 3]
-        vols = np.abs(np.einsum('ij,ij->i', v1, np.cross(v2, v3))) / 6.0
-        total_vol = vols.sum()
+        # --- face areas ---
+        p = self.nodes[sel]                              # (n, 3, 3)
+        v1 = p[:, 1] - p[:, 0]
+        v2 = p[:, 2] - p[:, 0]
+        areas = 0.5 * np.linalg.norm(np.cross(v1, v2), axis=1)
+        total_area = areas.sum()
 
-        # T0_stable averaged at the 4 vertices of each selected tet
-        T0_verts = self.T0_stable[sel]                   # (n, 4)
-        T0_tet = T0_verts.mean(axis=1)                   # (n,)
+        # --- T0_stable averaged at 3 vertices of each face ---
+        T0_face = self.T0_stable[sel].mean(axis=1)      # (n,)
 
-        # T(t) averaged at the 4 vertices of each selected tet
-        T_verts = self.T[:, sel]                         # (snaps, n, 4)
-        T_tet   = T_verts.mean(axis=2)                   # (snaps, n)
+        # --- T(t) averaged at 3 vertices of each face ---
+        T_face = self.T[:, sel].mean(axis=2)             # (snaps, n)
 
-        # |T0 - T(t)| per element, volume-weighted mean
-        diff = np.abs(T0_tet[np.newaxis, :] - T_tet)    # (snaps, n)
-        delta_arr = (diff * vols[np.newaxis, :]).sum(axis=1) / total_vol
+        # --- area-weighted mean of |T0 - T(t)| ---
+        diff = np.abs(T0_face[np.newaxis, :] - T_face)  # (snaps, n)
+        delta_arr = (diff * areas[np.newaxis, :]).sum(axis=1) / total_area
 
         return self.times.copy(), delta_arr
 
@@ -181,6 +149,8 @@ class DHEResult:
 class DHE_simulation():
     def __init__(self, csv, R_min, R_max, z_min, z_max, alpha=0.01, nz=20, nr=10, nangl=15):
         self.csv = csv
+        self.R_min = R_min
+        self.z_min = z_min
         self._R_range = np.linspace(R_min, R_max, nr)
         self._Z_range = np.linspace(0, z_max, nz)
         self.cylinder = CylinderMesh(self._R_range, self._Z_range, z_min, nangl)
@@ -203,19 +173,19 @@ class DHE_simulation():
         dt, t_save, t_on, t_off, tf, T_c :
             Same as before.
         stab_dt : float or None
-            Time step used during stabilization.  Defaults to ``dt``.
+            Time step for stabilization. Defaults to dt.
         stab_tol : float
-            Relative tolerance for the stabilization loop (default 1e-6).
+            Relative tolerance for stabilization (default 1e-6).
         """
         if stab_dt is None:
             stab_dt = dt
 
-        # 1. Stabilize: evolve with insulated boundary until steady state
+        # 1. Stabilize: insulated boundary until steady state
         T0_stable, n_stab = self._solver.stabilize(
             self.T0_array, dt=stab_dt, tol=stab_tol)
         print(f"[DHE] Stabilized in {n_stab} iterations (dt_stab={stab_dt})")
 
-        # 2. Run the actual simulation starting from the stable field
+        # 2. Run simulation from the stable field
         raw = self._solver.solve(
             T0=T0_stable,
             dt=dt,
@@ -225,13 +195,14 @@ class DHE_simulation():
             t_on=t_on,
             t_off=t_off)
 
-        # Flatten each snapshot to 1D — splu.solve may return (N,) or (N,1)
         T_list = [np.asarray(Ti).ravel() for Ti in raw["T"]]
 
         return DHEResult(
             nodes=self.cylinder.nodes,
             elements=self.cylinder.elements,
             boundary_faces=self.cylinder.boundary_faces,
+            R_min=self.R_min,
+            z_min=self.z_min,
             T0_stable=T0_stable,
             times=raw["t"],
             T_snapshots=np.vstack(T_list),
