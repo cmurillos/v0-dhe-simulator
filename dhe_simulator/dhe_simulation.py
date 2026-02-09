@@ -20,16 +20,20 @@ class DHEResult:
         Tetrahedral connectivity (node indices per tetrahedron).
     boundary_faces : ndarray, shape (N_faces, 3)
         Triangular boundary-face connectivity.
+    T0_stable : ndarray, shape (N_nodes,)
+        Stabilized initial temperature field.
     times : ndarray, shape (N_snapshots,)
         Saved time instants.
     T : ndarray, shape (N_snapshots, N_nodes)
         Temperature at every node for each saved snapshot.
     """
 
-    def __init__(self, nodes, elements, boundary_faces, times, T_snapshots):
+    def __init__(self, nodes, elements, boundary_faces, T0_stable,
+                 times, T_snapshots):
         self.nodes = np.asarray(nodes)
         self.elements = np.asarray(elements)
         self.boundary_faces = np.asarray(boundary_faces)
+        self.T0_stable = np.asarray(T0_stable, dtype=float).ravel()
         self.times = np.asarray(times, dtype=float)
         # Guarantee a homogeneous (N_snapshots, N_nodes) float array
         # even if individual snapshots have inconsistent shapes.
@@ -61,6 +65,7 @@ class DHEResult:
             nodes=self.nodes,
             elements=self.elements,
             boundary_faces=self.boundary_faces,
+            T0_stable=self.T0_stable,
             times=self.times,
             T=self.T,
         )
@@ -85,48 +90,50 @@ class DHEResult:
             nodes=data["nodes"],
             elements=data["elements"],
             boundary_faces=data["boundary_faces"],
+            T0_stable=data["T0_stable"],
             times=data["times"],
             T_snapshots=data["T"],
         )
 
-    def mean_temperature(self, r_max, z_low, z_high):
+    def delta(self, r_max, z_low, z_high):
         """
-        Volume-weighted mean temperature inside a sub-cylinder.
-
-        Selects every tetrahedron whose centroid satisfies
-        ``r <= r_max`` and ``z_low <= z <= z_high``, then computes
+        Volume-weighted mean perturbation from the stable initial
+        condition inside a sub-cylinder:
 
         .. math::
 
-            \\langle T \\rangle(t) =
-            \\frac{\\sum_e V_e \\, \\bar T_e(t)}{\\sum_e V_e}
+            \\delta(t) =
+            \\frac{\\sum_e V_e \\, |\\bar T_{0,e} - \\bar T_e(t)|}
+                 {\\sum_e V_e}
 
-        where the sum runs over selected elements, *V_e* is the
-        tetrahedron volume, and  *T_e* is the average of T at its
-        four vertices.
+        where the sum runs over tetrahedra whose centroid satisfies
+        ``r <= r_max`` and ``z_low <= z <= z_high``, *V_e* is the
+        tetrahedron volume, and the bar denotes the average over
+        its four vertices.
 
         Both ``z_low`` and ``z_high`` are **absolute** z-coordinates
-        measured from the bottom of the mesh (z = 0).  For example,
-        on a mesh with ``z_min = 150, z_max = 200``:
-
-        * Upper half:  ``z_low=175, z_high=200``
-        * Lower half:  ``z_low=150, z_high=175``
-        * Full height: ``z_low=150, z_high=200``
+        measured from z = 0.
 
         Parameters
         ----------
         r_max : float
-            Maximum radial distance (must be <= mesh outer radius).
+            Maximum radial distance.
         z_low : float
-            Lower z-bound of the region (absolute coordinate).
+            Lower z-bound (absolute coordinate).
         z_high : float
-            Upper z-bound of the region (absolute coordinate).
+            Upper z-bound (absolute coordinate).
 
         Returns
         -------
         times : ndarray, shape (N_snapshots,)
-        T_means : ndarray, shape (N_snapshots,)
+        delta : ndarray, shape (N_snapshots,)
         """
+        if self.T0_stable is None:
+            raise RuntimeError(
+                "T0_stable not available. Run the simulation with "
+                "stabilization first."
+            )
+
         pts = self.nodes[self.elements]                  # (N_tet, 4, 3)
         centroids = pts.mean(axis=1)                     # (N_tet, 3)
         r_c = np.sqrt(centroids[:, 0]**2 + centroids[:, 1]**2)
@@ -146,16 +153,21 @@ class DHEResult:
         v2 = pts[mask, 1] - pts[mask, 3]
         v3 = pts[mask, 2] - pts[mask, 3]
         vols = np.abs(np.einsum('ij,ij->i', v1, np.cross(v2, v3))) / 6.0
-
         total_vol = vols.sum()
 
-        # T averaged at the 4 vertices of each selected tet, per snapshot
+        # T0_stable averaged at the 4 vertices of each selected tet
+        T0_verts = self.T0_stable[sel]                   # (n, 4)
+        T0_tet = T0_verts.mean(axis=1)                   # (n,)
+
+        # T(t) averaged at the 4 vertices of each selected tet
         T_verts = self.T[:, sel]                         # (snaps, n, 4)
         T_tet   = T_verts.mean(axis=2)                   # (snaps, n)
 
-        T_means = (T_tet * vols[np.newaxis, :]).sum(axis=1) / total_vol
+        # |T0 - T(t)| per element, volume-weighted mean
+        diff = np.abs(T0_tet[np.newaxis, :] - T_tet)    # (snaps, n)
+        delta_arr = (diff * vols[np.newaxis, :]).sum(axis=1) / total_vol
 
-        return self.times.copy(), T_means
+        return self.times.copy(), delta_arr
 
     def __repr__(self):
         return (
@@ -183,9 +195,29 @@ class DHE_simulation():
         k_field = lambda x: gen.k(*x)
         return p_field, c_field, k_field, np.array([gen.T(*x) for x in self._solver.skfem_nodes])
 
-    def solve(self, dt, t_save, t_on, t_off, tf, T_c):
+    def solve(self, dt, t_save, t_on, t_off, tf, T_c,
+              stab_dt=None, stab_tol=1e-6):
+        """
+        Parameters
+        ----------
+        dt, t_save, t_on, t_off, tf, T_c :
+            Same as before.
+        stab_dt : float or None
+            Time step used during stabilization.  Defaults to ``dt``.
+        stab_tol : float
+            Relative tolerance for the stabilization loop (default 1e-6).
+        """
+        if stab_dt is None:
+            stab_dt = dt
+
+        # 1. Stabilize: evolve with insulated boundary until steady state
+        T0_stable, n_stab = self._solver.stabilize(
+            self.T0_array, dt=stab_dt, tol=stab_tol)
+        print(f"[DHE] Stabilized in {n_stab} iterations (dt_stab={stab_dt})")
+
+        # 2. Run the actual simulation starting from the stable field
         raw = self._solver.solve(
-            T0=self.T0_array,
+            T0=T0_stable,
             dt=dt,
             tf=tf,
             t_save=t_save,
@@ -200,6 +232,7 @@ class DHE_simulation():
             nodes=self.cylinder.nodes,
             elements=self.cylinder.elements,
             boundary_faces=self.cylinder.boundary_faces,
+            T0_stable=T0_stable,
             times=raw["t"],
             T_snapshots=np.vstack(T_list),
         )

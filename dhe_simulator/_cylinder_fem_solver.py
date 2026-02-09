@@ -159,6 +159,66 @@ class CylinderFEMSolver:
         return asm(robin_load, self.boundary_basis)
 
     # ------------------------------------------------------------------
+    # Estabilización (frontera aislada)
+    # ------------------------------------------------------------------
+    def stabilize(self, T0, dt, tol=1e-6, max_iter=100000):
+        """
+        Evoluciona el sistema con gradiente de temperatura cero en la
+        frontera (condicion aislada) hasta que la temperatura ya no
+        cambie apreciablemente entre pasos.
+
+        Reutiliza las matrices ``M`` y ``K`` ya ensambladas (no re-
+        ensambla nada).
+
+        Criterio de parada:
+
+        .. math::
+
+            \\frac{\\|T^{n+1} - T^n\\|}{\\|T^n\\| + \\epsilon} < \\text{tol}
+
+        Parameters
+        ----------
+        T0 : ndarray, shape (N_nodes,)
+            Temperatura inicial (p.ej. del CSV experimental).
+        dt : float
+            Paso de tiempo para la relajacion.
+        tol : float, optional
+            Tolerancia relativa de convergencia (default 1e-6).
+        max_iter : int, optional
+            Maximo de iteraciones (default 100000).
+
+        Returns
+        -------
+        T_stable : ndarray, shape (N_nodes,)
+            Campo de temperatura estabilizado.
+        n_iter : int
+            Numero de iteraciones realizadas.
+        """
+        if self.M is None or self.K is None:
+            raise RuntimeError(
+                "Debe llamar assemble_system() antes de stabilize()."
+            )
+
+        A = (self.M + dt * self.K).tocsc()
+        solve = splu(A).solve
+
+        T = T0.copy().ravel()
+        for n in range(1, max_iter + 1):
+            b = self.M @ T
+            T_new = np.asarray(solve(b)).ravel()
+
+            norm_T = np.linalg.norm(T)
+            diff = np.linalg.norm(T_new - T)
+            if diff / (norm_T + 1e-30) < tol:
+                return T_new, n
+
+            T = T_new
+
+        print(f"[stabilize] Warning: max_iter={max_iter} reached "
+              f"(last rel change = {diff / (norm_T + 1e-30):.2e})")
+        return T, max_iter
+
+    # ------------------------------------------------------------------
     # Resolución temporal
     # ------------------------------------------------------------------
     def solve(self, T0, dt, tf, t_save, T_c_func, t_on, t_off):
