@@ -31,7 +31,10 @@ class DHEResult:
         self.elements = np.asarray(elements)
         self.boundary_faces = np.asarray(boundary_faces)
         self.times = np.asarray(times, dtype=float)
-        self.T = np.asarray(T_snapshots)
+        # Guarantee a homogeneous (N_snapshots, N_nodes) float array
+        # even if individual snapshots have inconsistent shapes.
+        self.T = np.vstack([np.asarray(s, dtype=float).ravel()
+                            for s in T_snapshots])
 
     # dict-like access for backward compatibility
     def __getitem__(self, key):
