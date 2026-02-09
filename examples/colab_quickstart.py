@@ -61,10 +61,19 @@ print(f"T final:   min={loaded.T[-1].min():.2f}  max={loaded.T[-1].max():.2f}")
 # ---- Cell 7: Mean temperature in a sub-cylinder -------------
 import matplotlib.pyplot as plt
 
-r_sub = 50.0   # inner radius of interest (must be <= R_max)
-h_sub = 180.0  # max height of interest   (must be <= z_max)
+# z_low and z_high are ABSOLUTE z-coordinates (measured from z=0,
+# the bottom of the full mesh, NOT relative to z_min).
+#
+# Example on a mesh with z_min=150, z_max=200:
+#   Upper half  -> z_low=175, z_high=200
+#   Lower half  -> z_low=150, z_high=175
+#   Full height -> z_low=150, z_high=200
 
-times, T_means = res.mean_temperature(r_max=r_sub, h=h_sub)
+r_sub  = 50.0    # max radius of sub-cylinder
+z_lo   = 175.0   # lower z-bound  (upper half of the reservoir)
+z_hi   = 200.0   # upper z-bound
+
+times, T_means = res.mean_temperature(r_max=r_sub, z_low=z_lo, z_high=z_hi)
 
 print("times  :", times)
 print("T_means:", T_means)
@@ -73,7 +82,7 @@ plt.figure()
 plt.plot(times, T_means, '-o')
 plt.xlabel('Time [s]')
 plt.ylabel('Mean temperature [K]')
-plt.title(f'Volume-averaged T  (r<={r_sub}, z<={h_sub})')
+plt.title(f'Volume-averaged T  (r<={r_sub}, {z_lo}<=z<={z_hi})')
 plt.grid(True)
 plt.tight_layout()
 plt.show()

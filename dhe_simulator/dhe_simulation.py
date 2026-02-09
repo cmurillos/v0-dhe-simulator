@@ -89,12 +89,12 @@ class DHEResult:
             T_snapshots=data["T"],
         )
 
-    def mean_temperature(self, r_max, h):
+    def mean_temperature(self, r_max, z_low, z_high):
         """
         Volume-weighted mean temperature inside a sub-cylinder.
 
         Selects every tetrahedron whose centroid satisfies
-        ``r <= r_max`` and ``z <= h``, then computes
+        ``r <= r_max`` and ``z_low <= z <= z_high``, then computes
 
         .. math::
 
@@ -105,12 +105,22 @@ class DHEResult:
         tetrahedron volume, and  *T_e* is the average of T at its
         four vertices.
 
+        Both ``z_low`` and ``z_high`` are **absolute** z-coordinates
+        measured from the bottom of the mesh (z = 0).  For example,
+        on a mesh with ``z_min = 150, z_max = 200``:
+
+        * Upper half:  ``z_low=175, z_high=200``
+        * Lower half:  ``z_low=150, z_high=175``
+        * Full height: ``z_low=150, z_high=200``
+
         Parameters
         ----------
         r_max : float
             Maximum radial distance (must be <= mesh outer radius).
-        h : float
-            Maximum height (z coordinate).
+        z_low : float
+            Lower z-bound of the region (absolute coordinate).
+        z_high : float
+            Upper z-bound of the region (absolute coordinate).
 
         Returns
         -------
@@ -122,10 +132,11 @@ class DHEResult:
         r_c = np.sqrt(centroids[:, 0]**2 + centroids[:, 1]**2)
         z_c = centroids[:, 2]
 
-        mask = (r_c <= r_max) & (z_c <= h)
+        mask = (r_c <= r_max) & (z_c >= z_low) & (z_c <= z_high)
         if not mask.any():
             raise ValueError(
-                f"No elements found with r<={r_max} and z<={h}."
+                f"No elements found with r<={r_max} and "
+                f"{z_low}<=z<={z_high}."
             )
 
         sel = self.elements[mask]                        # (n, 4)
