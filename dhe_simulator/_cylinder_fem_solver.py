@@ -212,11 +212,11 @@ class CylinderFEMSolver:
                 # Robin activo: re-ensamblar carga porque T_c depende de t
                 F_robin = self._assemble_robin_load(t_next, T_c_func)
                 b = self.M @ T + dt * F_robin
-                T = solve_active(b)
+                T = np.asarray(solve_active(b)).ravel()
             else:
                 # Frontera aislada (α = 0)
                 b = self.M @ T
-                T = solve_inactive(b)
+                T = np.asarray(solve_inactive(b)).ravel()
 
             t = t_next
             if t >= next_save - 1e-12:
