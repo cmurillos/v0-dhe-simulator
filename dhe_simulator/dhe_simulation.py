@@ -86,6 +86,63 @@ class DHEResult:
             T_snapshots=data["T"],
         )
 
+    def mean_temperature(self, r_max, h):
+        """
+        Volume-weighted mean temperature inside a sub-cylinder.
+
+        Selects every tetrahedron whose centroid satisfies
+        ``r <= r_max`` and ``z <= h``, then computes
+
+        .. math::
+
+            \\langle T \\rangle(t) =
+            \\frac{\\sum_e V_e \\, \\bar T_e(t)}{\\sum_e V_e}
+
+        where the sum runs over selected elements, *V_e* is the
+        tetrahedron volume, and  *T_e* is the average of T at its
+        four vertices.
+
+        Parameters
+        ----------
+        r_max : float
+            Maximum radial distance (must be <= mesh outer radius).
+        h : float
+            Maximum height (z coordinate).
+
+        Returns
+        -------
+        times : ndarray, shape (N_snapshots,)
+        T_means : ndarray, shape (N_snapshots,)
+        """
+        pts = self.nodes[self.elements]                  # (N_tet, 4, 3)
+        centroids = pts.mean(axis=1)                     # (N_tet, 3)
+        r_c = np.sqrt(centroids[:, 0]**2 + centroids[:, 1]**2)
+        z_c = centroids[:, 2]
+
+        mask = (r_c <= r_max) & (z_c <= h)
+        if not mask.any():
+            raise ValueError(
+                f"No elements found with r<={r_max} and z<={h}."
+            )
+
+        sel = self.elements[mask]                        # (n, 4)
+
+        # tetrahedron volumes  |det[v1,v2,v3]| / 6
+        v1 = pts[mask, 0] - pts[mask, 3]
+        v2 = pts[mask, 1] - pts[mask, 3]
+        v3 = pts[mask, 2] - pts[mask, 3]
+        vols = np.abs(np.einsum('ij,ij->i', v1, np.cross(v2, v3))) / 6.0
+
+        total_vol = vols.sum()
+
+        # T averaged at the 4 vertices of each selected tet, per snapshot
+        T_verts = self.T[:, sel]                         # (snaps, n, 4)
+        T_tet   = T_verts.mean(axis=2)                   # (snaps, n)
+
+        T_means = (T_tet * vols[np.newaxis, :]).sum(axis=1) / total_vol
+
+        return self.times.copy(), T_means
+
     def __repr__(self):
         return (
             f"DHEResult(nodes={self.nodes.shape}, "

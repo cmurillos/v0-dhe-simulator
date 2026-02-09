@@ -58,6 +58,26 @@ print(f"Times:     {loaded.times.shape}  -> {loaded.times}")
 print(f"T matrix:  {loaded.T.shape}")
 print(f"T final:   min={loaded.T[-1].min():.2f}  max={loaded.T[-1].max():.2f}")
 
-# ---- Cell 7: Backward-compatible dict access -----------------
+# ---- Cell 7: Mean temperature in a sub-cylinder -------------
+import matplotlib.pyplot as plt
+
+r_sub = 50.0   # inner radius of interest (must be <= R_max)
+h_sub = 180.0  # max height of interest   (must be <= z_max)
+
+times, T_means = res.mean_temperature(r_max=r_sub, h=h_sub)
+
+print("times  :", times)
+print("T_means:", T_means)
+
+plt.figure()
+plt.plot(times, T_means, '-o')
+plt.xlabel('Time [s]')
+plt.ylabel('Mean temperature [K]')
+plt.title(f'Volume-averaged T  (r<={r_sub}, z<={h_sub})')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# ---- Cell 8: Backward-compatible dict access -----------------
 # res['t'] and res['T'] still work as before:
 print(f"Snapshots via dict: {len(res['t'])}")
