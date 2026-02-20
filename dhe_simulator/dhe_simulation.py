@@ -7,6 +7,50 @@ from ._cylinder_fem_solver import CylinderFEMSolver
 from ._generador_campos import GeneradorCamposFisicos
 
 
+def _borehole_geometry(nodes, boundary_faces, R_min, z_min):
+    """
+    Return (sel, areas, total_area) for the inner-wall faces.
+
+    sel   : (n, 3) index array of selected boundary faces
+    areas : (n,)   area of each face
+    total : float  sum of areas
+    """
+    face_pts = nodes[boundary_faces]
+    r_v = np.sqrt(face_pts[:, :, 0]**2 + face_pts[:, :, 1]**2)
+    z_v = face_pts[:, :, 2]
+    tol_r = 0.5 * R_min
+    mask = (
+        np.all(np.abs(r_v - R_min) < tol_r, axis=1) &
+        np.all(z_v >= z_min - 1e-6, axis=1)
+    )
+    if not mask.any():
+        raise RuntimeError("No borehole faces found. Check R_min / z_min.")
+    sel = boundary_faces[mask]
+    p = nodes[sel]
+    v1 = p[:, 1] - p[:, 0]
+    v2 = p[:, 2] - p[:, 0]
+    areas = 0.5 * np.linalg.norm(np.cross(v1, v2), axis=1)
+    return sel, areas, areas.sum()
+
+
+def _compute_delta(T0_stable, T_matrix, nodes, boundary_faces, R_min, z_min):
+    """
+    Area-weighted  mean|T0_stable - T(t)|  on the borehole wall.
+
+    Parameters
+    ----------
+    T0_stable : (N_nodes,)
+    T_matrix  : (N_snaps, N_nodes)
+    Returns   : (N_snaps,)
+    """
+    sel, areas, total_area = _borehole_geometry(nodes, boundary_faces,
+                                                R_min, z_min)
+    T0_face = T0_stable[sel].mean(axis=1)            # (n,)
+    T_face  = T_matrix[:, sel].mean(axis=2)           # (snaps, n)
+    diff = np.abs(T0_face[np.newaxis, :] - T_face)
+    return (diff * areas[np.newaxis, :]).sum(axis=1) / total_area
+
+
 class DHEResult:
     """
     Container for DHE simulation results.
@@ -84,9 +128,6 @@ class DHEResult:
         """
         Area-weighted mean perturbation on the borehole wall.
 
-        Automatically identifies the boundary faces of the inner
-        cylindrical surface (r ~ R_min, z >= z_min), then computes
-
             delta(t) = sum_f A_f |T0_f - T_f(t)| / sum_f A_f
 
         No parameters needed -- R_min and z_min come from the
@@ -97,47 +138,10 @@ class DHEResult:
         times : ndarray, shape (N_snapshots,)
         delta : ndarray, shape (N_snapshots,)
         """
-        if self.T0_stable is None:
-            raise RuntimeError(
-                "T0_stable not available. Run with stabilization first."
-            )
-
-        # --- identify borehole faces ---
-        face_pts = self.nodes[self.boundary_faces]       # (F, 3, 3)
-        r_verts = np.sqrt(face_pts[:, :, 0]**2 +
-                          face_pts[:, :, 1]**2)          # (F, 3)
-        z_verts = face_pts[:, :, 2]                      # (F, 3)
-
-        tol_r = 0.5 * self.R_min
-        inner = (
-            np.all(np.abs(r_verts - self.R_min) < tol_r, axis=1) &
-            np.all(z_verts >= self.z_min - 1e-6, axis=1)
-        )
-        if not inner.any():
-            raise RuntimeError(
-                "No borehole faces found. Check R_min / z_min."
-            )
-
-        sel = self.boundary_faces[inner]                 # (n, 3)
-
-        # --- face areas ---
-        p = self.nodes[sel]                              # (n, 3, 3)
-        v1 = p[:, 1] - p[:, 0]
-        v2 = p[:, 2] - p[:, 0]
-        areas = 0.5 * np.linalg.norm(np.cross(v1, v2), axis=1)
-        total_area = areas.sum()
-
-        # --- T0_stable averaged at 3 vertices of each face ---
-        T0_face = self.T0_stable[sel].mean(axis=1)      # (n,)
-
-        # --- T(t) averaged at 3 vertices of each face ---
-        T_face = self.T[:, sel].mean(axis=2)             # (snaps, n)
-
-        # --- area-weighted mean of |T0 - T(t)| ---
-        diff = np.abs(T0_face[np.newaxis, :] - T_face)  # (snaps, n)
-        delta_arr = (diff * areas[np.newaxis, :]).sum(axis=1) / total_area
-
-        return self.times.copy(), delta_arr
+        d = _compute_delta(self.T0_stable, self.T,
+                           self.nodes, self.boundary_faces,
+                           self.R_min, self.z_min)
+        return self.times.copy(), d
 
     def __repr__(self):
         return (
@@ -222,3 +226,79 @@ class DHE_simulation():
             times=raw["t"],
             T_snapshots=np.vstack(T_list),
         )
+
+    def scan_toff(self, dt, t_save, t_on, t_off_array, tf, T_c,
+                  stab_dt=None, stab_tol=1e-6):
+        """
+        Run one simulation per ``t_off`` value, sharing a single
+        stabilization.
+
+        Parameters
+        ----------
+        dt, t_save, t_on, tf, T_c :
+            Same as :meth:`solve`.
+        t_off_array : array-like
+            Sequence of t_off values to sweep.
+        stab_dt : float or None
+            Time step for stabilization.  Defaults to ``dt``.
+        stab_tol : float
+            Tolerance for stabilization (default 1e-6).
+
+        Returns
+        -------
+        result : ndarray, shape (N_snapshots, 1 + len(t_off_array))
+            Column 0 = times, columns 1..n = delta curves.
+        """
+        t_off_array = np.asarray(t_off_array, dtype=float)
+        n_runs = len(t_off_array)
+
+        if stab_dt is None:
+            stab_dt = dt
+
+        # 1. Stabilize once
+        print(f"[scan] Phase 1/{n_runs+1} : Stabilizing ...")
+        t0w = time.time()
+        T0_stable, n_stab = self._solver.stabilize(
+            self.T0_array, dt=stab_dt, tol=stab_tol)
+        print(f"[scan] Stabilized in {n_stab} iters "
+              f"({time.time()-t0w:.1f}s)")
+
+        # Pre-compute borehole geometry once
+        sel, areas, total_area = _borehole_geometry(
+            self.cylinder.nodes, self.cylinder.boundary_faces,
+            self.R_min, self.z_min)
+        T0_face = T0_stable[sel].mean(axis=1)           # (n_faces,)
+
+        times_ref = None
+        deltas = []
+
+        for i, t_off in enumerate(t_off_array):
+            label = f"[scan] Run {i+1}/{n_runs}  t_off={t_off:.0f}"
+            print(label)
+
+            raw = self._solver.solve(
+                T0=T0_stable,
+                dt=dt,
+                tf=tf,
+                t_save=t_save,
+                T_c_func=T_c,
+                t_on=t_on,
+                t_off=t_off)
+
+            T_mat = np.vstack([np.asarray(Ti, dtype=float).ravel()
+                               for Ti in raw["T"]])
+            times_arr = np.asarray(raw["t"], dtype=float)
+
+            if times_ref is None:
+                times_ref = times_arr
+
+            # delta on borehole wall
+            T_face = T_mat[:, sel].mean(axis=2)          # (snaps, n_faces)
+            diff = np.abs(T0_face[np.newaxis, :] - T_face)
+            delta_col = (diff * areas[np.newaxis, :]).sum(axis=1) / total_area
+            deltas.append(delta_col)
+
+        # assemble matrix:  times | delta_1 | ... | delta_n
+        result = np.column_stack([times_ref] + deltas)
+        print(f"[scan] Done. Result shape: {result.shape}")
+        return result
