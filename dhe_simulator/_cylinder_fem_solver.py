@@ -1,6 +1,25 @@
+import sys
+import time
 import numpy as np
 from skfem import MeshTet, ElementTetP1, Basis, asm, BilinearForm, LinearForm, helpers
 from scipy.sparse.linalg import splu
+
+
+def _fmt_time(seconds):
+    """Format seconds into a compact human string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def _bar(fraction, width=30):
+    """Return a compact progress bar string."""
+    filled = int(width * fraction)
+    return "\u2588" * filled + "\u2591" * (width - filled)
 
 
 class CylinderFEMSolver:
@@ -203,19 +222,43 @@ class CylinderFEMSolver:
         solve = splu(A).solve
 
         T = T0.copy().ravel()
+        t0_wall = time.time()
+        rel_change = 1.0
+
         for n in range(1, max_iter + 1):
             b = self.M @ T
             T_new = np.asarray(solve(b)).ravel()
 
             norm_T = np.linalg.norm(T)
             diff = np.linalg.norm(T_new - T)
-            if diff / (norm_T + 1e-30) < tol:
+            rel_change = diff / (norm_T + 1e-30)
+
+            if n % 20 == 0 or rel_change < tol:
+                # log-scale progress: tol .. 1 mapped to 0% .. 100%
+                import math
+                log_rc = math.log10(max(rel_change, tol))
+                log_tol = math.log10(tol)
+                frac = max(0.0, min(1.0, 1.0 - log_rc / log_tol))
+                elapsed = time.time() - t0_wall
+                eta = (elapsed / max(frac, 1e-6)) * (1 - frac) if frac > 0.01 else 0
+                sys.stdout.write(
+                    f"\r  Stabilizing {_bar(frac)} {frac*100:5.1f}%"
+                    f"  iter {n}  rel={rel_change:.1e}"
+                    f"  [{_fmt_time(elapsed)}<{_fmt_time(eta)}]   "
+                )
+                sys.stdout.flush()
+
+            if rel_change < tol:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
                 return T_new, n
 
             T = T_new
 
-        print(f"[stabilize] Warning: max_iter={max_iter} reached "
-              f"(last rel change = {diff / (norm_T + 1e-30):.2e})")
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        print(f"  [stabilize] Warning: max_iter={max_iter} reached "
+              f"(last rel change = {rel_change:.2e})")
         return T, max_iter
 
     # ------------------------------------------------------------------
@@ -265,16 +308,19 @@ class CylinderFEMSolver:
         t = 0.0
         next_save = t_save
 
+        total_steps = int(np.ceil(tf / dt))
+        step = 0
+        t0_wall = time.time()
+
         while t < tf - 1e-12:
             t_next = t + dt
+            step += 1
 
             if t_on < t_next < t_off:
-                # Robin activo: re-ensamblar carga porque T_c depende de t
                 F_robin = self._assemble_robin_load(t_next, T_c_func)
                 b = self.M @ T + dt * F_robin
                 T = np.asarray(solve_active(b)).ravel()
             else:
-                # Frontera aislada (α = 0)
                 b = self.M @ T
                 T = np.asarray(solve_inactive(b)).ravel()
 
@@ -284,4 +330,20 @@ class CylinderFEMSolver:
                 results["T"].append(T.copy())
                 next_save += t_save
 
+            # progress every 10 steps or last step
+            if step % 10 == 0 or step == total_steps:
+                frac = min(step / total_steps, 1.0)
+                elapsed = time.time() - t0_wall
+                eta = (elapsed / max(frac, 1e-6)) * (1 - frac) if frac > 0.01 else 0
+                phase = "Robin" if t_on < t < t_off else "Adiab"
+                sys.stdout.write(
+                    f"\r  Solving     {_bar(frac)} {frac*100:5.1f}%"
+                    f"  step {step}/{total_steps}  t={t:.0f}"
+                    f"  [{phase}]"
+                    f"  [{_fmt_time(elapsed)}<{_fmt_time(eta)}]   "
+                )
+                sys.stdout.flush()
+
+        sys.stdout.write("\n")
+        sys.stdout.flush()
         return results

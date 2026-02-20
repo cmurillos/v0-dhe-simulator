@@ -1,3 +1,5 @@
+import sys
+import time
 import numpy as np
 
 from ._cylinder_mesh import CylinderMesh
@@ -153,10 +155,20 @@ class DHE_simulation():
         self.z_min = z_min
         self._R_range = np.linspace(R_min, R_max, nr)
         self._Z_range = np.linspace(0, z_max, nz)
+
+        print("[DHE] Building mesh ...", end=" ", flush=True)
         self.cylinder = CylinderMesh(self._R_range, self._Z_range, z_min, nangl)
+        print(f"({self.cylinder.nodes.shape[0]} nodes)")
+
         self._solver = CylinderFEMSolver(self.cylinder.nodes, self.cylinder.elements, self.cylinder.boundary_faces)
+
+        print("[DHE] Interpolating physical fields ...", end=" ", flush=True)
         self.p, self.c, self.k, self.T0_array = self._get_fields()
+        print("done")
+
+        print("[DHE] Assembling FEM matrices ...", end=" ", flush=True)
         self._solver.assemble_system(self.p, self.c, self.k, alpha, R_min, 0.1)
+        print("done")
 
     def _get_fields(self):
         gen = GeneradorCamposFisicos(ruta_csv=self.csv, nodes=self._solver.skfem_nodes)
@@ -181,11 +193,14 @@ class DHE_simulation():
             stab_dt = dt
 
         # 1. Stabilize: insulated boundary until steady state
+        print("[DHE] Phase 1/2 : Stabilizing initial condition ...")
+        t0 = time.time()
         T0_stable, n_stab = self._solver.stabilize(
             self.T0_array, dt=stab_dt, tol=stab_tol)
-        print(f"[DHE] Stabilized in {n_stab} iterations (dt_stab={stab_dt})")
+        print(f"[DHE] Stabilized in {n_stab} iters ({time.time()-t0:.1f}s)")
 
         # 2. Run simulation from the stable field
+        print("[DHE] Phase 2/2 : Solving thermal evolution ...")
         raw = self._solver.solve(
             T0=T0_stable,
             dt=dt,
