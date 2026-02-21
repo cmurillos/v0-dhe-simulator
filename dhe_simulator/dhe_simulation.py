@@ -33,22 +33,19 @@ def _borehole_geometry(nodes, boundary_faces, R_min, z_min):
     return sel, areas, areas.sum()
 
 
-def _compute_delta(T0_stable, T_matrix, nodes, boundary_faces, R_min, z_min):
+def _compute_T_mean(T_matrix, nodes, boundary_faces, R_min, z_min):
     """
-    Area-weighted  mean|T0_stable - T(t)|  on the borehole wall.
+    Area-weighted mean temperature on the borehole wall.
 
     Parameters
     ----------
-    T0_stable : (N_nodes,)
     T_matrix  : (N_snaps, N_nodes)
     Returns   : (N_snaps,)
     """
     sel, areas, total_area = _borehole_geometry(nodes, boundary_faces,
                                                 R_min, z_min)
-    T0_face = T0_stable[sel].mean(axis=1)            # (n,)
-    T_face  = T_matrix[:, sel].mean(axis=2)           # (snaps, n)
-    diff = np.abs(T0_face[np.newaxis, :] - T_face)
-    return (diff * areas[np.newaxis, :]).sum(axis=1) / total_area
+    T_face = T_matrix[:, sel].mean(axis=2)           # (snaps, n)
+    return (T_face * areas[np.newaxis, :]).sum(axis=1) / total_area
 
 
 class DHEResult:
@@ -124,11 +121,11 @@ class DHEResult:
             T_snapshots=data["T"],
         )
 
-    def delta(self):
+    def T_borehole(self):
         """
-        Area-weighted mean perturbation on the borehole wall.
+        Area-weighted mean temperature on the borehole wall.
 
-            delta(t) = sum_f A_f |T0_f - T_f(t)| / sum_f A_f
+            T_mean(t) = sum_f A_f * T_f(t) / sum_f A_f
 
         No parameters needed -- R_min and z_min come from the
         simulation geometry.
@@ -136,12 +133,11 @@ class DHEResult:
         Returns
         -------
         times : ndarray, shape (N_snapshots,)
-        delta : ndarray, shape (N_snapshots,)
+        T_mean : ndarray, shape (N_snapshots,)
         """
-        d = _compute_delta(self.T0_stable, self.T,
-                           self.nodes, self.boundary_faces,
-                           self.R_min, self.z_min)
-        return self.times.copy(), d
+        Tm = _compute_T_mean(self.T, self.nodes, self.boundary_faces,
+                             self.R_min, self.z_min)
+        return self.times.copy(), Tm
 
     def __repr__(self):
         return (
@@ -247,7 +243,7 @@ class DHE_simulation():
         Returns
         -------
         result : ndarray, shape (N_snapshots, 1 + len(t_off_array))
-            Column 0 = times, columns 1..n = delta curves.
+            Column 0 = times, columns 1..n = mean borehole T curves.
         """
         t_off_array = np.asarray(t_off_array, dtype=float)
         n_runs = len(t_off_array)
@@ -267,14 +263,12 @@ class DHE_simulation():
         sel, areas, total_area = _borehole_geometry(
             self.cylinder.nodes, self.cylinder.boundary_faces,
             self.R_min, self.z_min)
-        T0_face = T0_stable[sel].mean(axis=1)           # (n_faces,)
 
         times_ref = None
-        deltas = []
+        T_mean_cols = []
 
         for i, t_off in enumerate(t_off_array):
-            label = f"[scan] Run {i+1}/{n_runs}  t_off={t_off:.0f}"
-            print(label)
+            print(f"[scan] Run {i+1}/{n_runs}  t_off={t_off:.0f}")
 
             raw = self._solver.solve(
                 T0=T0_stable,
@@ -292,13 +286,12 @@ class DHE_simulation():
             if times_ref is None:
                 times_ref = times_arr
 
-            # delta on borehole wall
+            # mean T on borehole wall
             T_face = T_mat[:, sel].mean(axis=2)          # (snaps, n_faces)
-            diff = np.abs(T0_face[np.newaxis, :] - T_face)
-            delta_col = (diff * areas[np.newaxis, :]).sum(axis=1) / total_area
-            deltas.append(delta_col)
+            Tm_col = (T_face * areas[np.newaxis, :]).sum(axis=1) / total_area
+            T_mean_cols.append(Tm_col)
 
-        # assemble matrix:  times | delta_1 | ... | delta_n
-        result = np.column_stack([times_ref] + deltas)
+        # assemble matrix:  times | T_mean_1 | ... | T_mean_n
+        result = np.column_stack([times_ref] + T_mean_cols)
         print(f"[scan] Done. Result shape: {result.shape}")
         return result

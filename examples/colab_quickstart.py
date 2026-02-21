@@ -42,28 +42,28 @@ res.save('simulation_output.npz')
 loaded = DHEResult.load('simulation_output.npz')
 print(f"Nodes: {loaded.nodes.shape}  |  Snapshots: {loaded.T.shape}")
 
-# ---- Cell 6: delta(t) on the borehole wall ------------------
+# ---- Cell 6: Mean T on the borehole wall --------------------
 import matplotlib.pyplot as plt
 
-# delta(t) is computed automatically on the inner cylindrical
-# surface (r ~ R_min, z >= z_min).  No arguments needed.
-times, delta = res.delta()
+# T_borehole() computes the area-weighted mean temperature on the
+# inner cylindrical surface (r ~ R_min, z >= z_min).  No args needed.
+times, T_mean = res.T_borehole()
 
-print("times:", times)
-print("delta:", delta)
+print("times :", times)
+print("T_mean:", T_mean)
 
 plt.figure()
-plt.plot(times, delta, '-o')
+plt.plot(times, T_mean, '-o')
 plt.xlabel('Time [s]')
-plt.ylabel(r'$\delta(t)$ [K]')
-plt.title('Mean perturbation on the borehole wall')
+plt.ylabel('Mean T [K]')
+plt.title('Mean borehole-wall temperature')
 plt.grid(True)
 plt.tight_layout()
 plt.show()
 
 # ---- Cell 7: scan_toff  -- sweep multiple t_off values ------
 # Stabilizes only once, then runs one simulation per t_off.
-# Returns a matrix: column 0 = times, columns 1..n = delta curves.
+# Returns a matrix: column 0 = times, columns 1..n = mean T curves.
 
 t_off_values = [800000, 1000000, 1200000, 1500000]
 
@@ -76,14 +76,14 @@ table = dhe.scan_toff(
     T_c=T_c,
 )
 
-# table[:, 0] = times,  table[:, i+1] = delta for t_off_values[i]
+# table[:, 0] = times,  table[:, i+1] = mean T for t_off_values[i]
 plt.figure()
 for i, toff in enumerate(t_off_values):
     plt.plot(table[:, 0], table[:, i + 1], '-o',
              label=f't_off={toff:.0f}')
 plt.xlabel('Time [s]')
-plt.ylabel(r'$\delta(t)$ [K]')
-plt.title('Borehole perturbation for different t_off')
+plt.ylabel('Mean T [K]')
+plt.title('Borehole mean temperature for different t_off')
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
