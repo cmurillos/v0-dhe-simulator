@@ -179,6 +179,25 @@ class CylinderFEMSolver:
         self._bh_z_levels = unique_z          # sorted
         self._bh_node_groups = groups
 
+    def borehole_profile(self, T_field):
+        """
+        Angular-average temperature on the borehole wall at each z-level.
+
+        Parameters
+        ----------
+        T_field : ndarray (N_nodes,)
+
+        Returns
+        -------
+        z_levels : ndarray (n_z,)
+        T_r      : ndarray (n_z,)
+        """
+        z = self._bh_z_levels
+        Tr = np.empty(len(z))
+        for i, zv in enumerate(z):
+            Tr[i] = T_field[self._bh_node_groups[zv]].mean()
+        return z, Tr
+
     def _compute_Tf(self, T_current):
         """
         Compute the fluid temperature T_f(z) at each borehole z-level

@@ -15,13 +15,13 @@ Usage
 
     sim = DHE_simulation(
         csv="physical_properties.csv",
-        R_min=0.05, R_max=0.10,
-        z_min=50, z_max=500,
+        R_min=0.1, R_max=100, z_min=150, z_max=1900,
+        h=500, rho_f=972, c_f=4195, v_f=0.5, T_in=293,
     )
-    results = sim.solve(dt=1.0, t_save=10, t_on=0, t_off=3600, tf=7200, T_c=...)
+    results = sim.solve(dt=20000, t_save=80000, t_on=600000, t_off=1000000, tf=2000000)
 """
 
-from .dhe_simulation import DHE_simulation, DHEResult
+from .dhe_simulation import DHE_simulation, DHEResult, ScanResult
 
-__all__ = ["DHE_simulation", "DHEResult"]
+__all__ = ["DHE_simulation", "DHEResult", "ScanResult"]
 __version__ = "0.1.0"
