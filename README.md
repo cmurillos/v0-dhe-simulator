@@ -41,11 +41,11 @@ $$\Omega = \Omega_{\mathrm{ext}} \setminus \Omega_{\mathrm{int}}$$
 
 con
 
-$$\Omega_{\mathrm{ext}} = \{(r,\theta,z) \in \mathbb{R}^3 : r < R_1,\; -L < z < 0\}$$
+$$\Omega_{\mathrm{ext}} = \{(r,\theta,z) \in \mathbb{R}^3 : r < R_{\max},\; 0 < z < z_{\max}\}$$
 
-$$\Omega_{\mathrm{int}} = \{(r,\theta,z) \in \mathbb{R}^3 : r < R_2,\; -d < z < 0\}, \quad R_2 \ll R_1$$
+$$\Omega_{\mathrm{int}} = \{(r,\theta,z) \in \mathbb{R}^3 : r < R_{\min},\; z_{\min} < z < z_{\max}\}$$
 
-Los parametros geometricos (R1, R2, L, d) son provistos por el usuario y permiten representar la region de subsuelo afectada por un pozo DHE.
+donde $R_{\min} \ll R_{\max}$. Los parametros geometricos son provistos por el usuario y permiten representar la region de subsuelo afectada por un pozo DHE.
 
 ---
 
@@ -69,52 +69,72 @@ $$k(x,y,z) = k_0(z) + \mathrm{var}(k_0)(z)\,G(x,y,z)$$
 
 $$T_0(x,y,z) = T_0(z) + \mathrm{var}(T_0)(z)\,G(x,y,z)$$
 
-Esta construccion garantiza que los **promedios y varianzas en profundidad** de los campos reconstruidos reproduzcan los valores reportados en la tabla experimental. En la implementacion, el campo aleatorio G se maneja como un **objeto interno del generador**, lo que permite reutilizar realizaciones coherentes entre distintos coeficientes fisicos.
-
 ---
 
 ### Modelo termico
 
-La evolucion de la temperatura se modela mediante la ecuacion de conduccion de calor con coeficientes heterogeneos
+La evolucion de la temperatura en la roca se modela mediante la ecuacion de conduccion de calor con coeficientes heterogeneos
 
 $$\rho(x)c(x)\,\partial_t T(x,t) = \nabla \cdot \big(k(x)\nabla T(x,t)\big), \quad (x,t) \in \Omega \times (0,t_f]$$
 
-con condicion inicial
+con condicion inicial estabilizada y condicion de frontera tipo Robin sobre la perforacion:
 
-$$T(x,0) = T_0(x)$$
+$$-k\,\nabla T \cdot \hat{n} = h\big(T_{\mathrm{rock}} - T_f(t,z)\big), \quad (x,t) \in \partial\Omega_{\mathrm{int}} \times (t_{\mathrm{on}}, t_{\mathrm{off}})$$
 
-y condicion de frontera tipo Robin no homogenea sobre la perforacion:
+En el resto de la frontera se impone flujo nulo (adiabatica).
 
-$$\nabla T \cdot \eta = -\frac{\alpha(x,t)}{k(x)}\big(T(x,t)-T_{\mathrm{int}}(x,t)\big), \quad (x,t) \in \partial\Omega_{\mathrm{int}} \times (t_{on}, t_{off})$$
+---
 
-En el resto de la frontera se impone flujo nulo.
+### Modelo de fluido convectivo
+
+La temperatura del fluido $T_f(t,z)$ dentro del pozo se calcula internamente a partir de la temperatura de la roca en la pared, usando un balance de energia en el flujo axial:
+
+$$T_r(t,z) = \frac{1}{2\pi}\int_0^{2\pi} T(t, R_{\min}\sin\theta, R_{\min}\cos\theta, z)\,d\theta$$
+
+$$\beta = \frac{2h}{\rho_f\, R_{\min}\, v_f\, c_f}$$
+
+$$T_f(t,z) = e^{-\beta(z-z_{\min})}\,T_{\mathrm{in}} + \beta\int_{z_{\min}}^{z} e^{-\beta(z-s)}\,T_r(t,s)\,ds$$
+
+donde:
+* $h$ es el coeficiente convectivo interno [W/(m^2 K)],
+* $\rho_f$ es la densidad del fluido [kg/m^3],
+* $c_f$ es el calor especifico del fluido [J/(kg K)],
+* $v_f$ es la velocidad axial del fluido [m/s],
+* $T_{\mathrm{in}}$ es la temperatura de entrada del fluido [K].
+
+En la implementacion, $T_r(z)$ se calcula como el **promedio aritmetico** de la temperatura en los nodos de la malla sobre la pared del pozo a cada nivel $z$, y la integral se evalua con **cuadratura trapezoidal**.
 
 ---
 
 ### Formato de salida
 
-El metodo `solve()` retorna un objeto `DHEResult` que encapsula toda la geometria y la dinamica termica de la simulacion. El metodo `save(path)` exporta los resultados a un archivo `.npz` comprimido con la siguiente estructura:
+#### Simulacion individual (`DHEResult`)
 
-| Clave             | Forma               | Descripcion                                           |
-|-------------------|---------------------|-------------------------------------------------------|
-| `nodes`           | `(N_nodes, 3)`      | Coordenadas (x, y, z) de cada nodo de la malla       |
-| `elements`        | `(N_tets, 4)`       | Indices de los 4 nodos de cada tetraedro              |
-| `boundary_faces`  | `(N_faces, 3)`      | Indices de los 3 nodos de cada triangulo de frontera  |
-| `times`           | `(N_snapshots,)`    | Instantes de tiempo guardados                         |
-| `T`               | `(N_snapshots, N_nodes)` | Temperatura en cada nodo para cada instante      |
+El metodo `solve()` retorna un objeto `DHEResult` con:
 
-Este formato es **no redundante** (la geometria se guarda una sola vez), **ligero** (compresion zip nativa de NumPy), y **completo** (permite reconstruir el campo T(t,x) sobre toda la malla sin perdida de informacion).
+| Clave             | Forma                    | Descripcion                                      |
+|-------------------|--------------------------|--------------------------------------------------|
+| `nodes`           | `(N_nodes, 3)`           | Coordenadas (x, y, z) de cada nodo               |
+| `elements`        | `(N_tets, 4)`            | Conectividad tetraedrica                          |
+| `boundary_faces`  | `(N_faces, 3)`           | Caras triangulares de frontera                    |
+| `T0_stable`       | `(N_nodes,)`             | Campo de temperatura estabilizado                 |
+| `times`           | `(N_snapshots,)`         | Instantes de tiempo guardados                     |
+| `T`               | `(N_snapshots, N_nodes)` | Temperatura en cada nodo por snapshot             |
+| `z_levels`        | `(n_z,)`                 | Niveles z en la pared del pozo                    |
+| `T_surface`       | `(N_snapshots, n_z)`     | Temperatura angular-promediada T(t, z) en el pozo |
 
----
+#### Barrido de t_off (`ScanResult`)
 
-### Objetivo del codigo
+El metodo `scan_toff()` retorna un `ScanResult` con:
 
-El proposito de esta libreria es permitir:
+| Clave         | Forma                       | Descripcion                                       |
+|---------------|-----------------------------|----------------------------------------------------|
+| `t_off_array` | `(n_toff,)`                 | Valores de t_off barridos                          |
+| `times`       | `(n_times,)`                | Instantes de tiempo                                |
+| `z_levels`    | `(n_z,)`                    | Niveles z en la pared del pozo                     |
+| `T_borehole`  | `(n_toff, n_times, n_z)`    | Superficie T(t, z) por cada t_off                  |
 
-1. Generar multiples realizaciones coherentes de campos fisicos aleatorios a partir de datos reales.
-2. Ejecutar simulaciones termicas consistentes con la fisica del subsuelo.
-3. Extraer funciones delta(t) y estimar estadisticamente los tiempos de recuperacion.
-4. Servir como base para modelos reducidos y leyes empiricas de recuperacion termica en pozos DHE.
+Ambos se guardan en formato `.npz` comprimido.
 
 ---
 
@@ -139,16 +159,42 @@ pip install git+https://github.com/cmurillos/v0-dhe-simulator.git@thermal-simula
 import numpy as np
 from dhe_simulator import DHE_simulation
 
-dhe = DHE_simulation('/content/perfiles_5_capas.csv', 1.0, 100.0, 150, 200)
-T_c = lambda t, x, y, z: np.full_like(x, 300.0)
-res = dhe.solve(dt=20000, t_save=80000, t_on=600000, t_off=1000000, tf=2000000, T_c=T_c)
+dhe = DHE_simulation(
+    'perfiles_5_capas.csv',
+    R_min=1.0, R_max=300.0, z_min=100, z_max=400,
+    h=500, rho_f=972, c_f=4195, v_f=0.5, T_in=293,
+    nr=12,
+)
 
-# Guardar resultados completos
-res.save('simulation_output.npz')
+res = dhe.solve(
+    dt=20000, t_save=100000,
+    t_on=500000, t_off=50000000,
+    tf=1000000000,
+    stab_tol=1e-9, stab_dt=100000,
+)
 
-# Cargar resultados
-data = np.load('simulation_output.npz')
-print(data['nodes'].shape, data['T'].shape)
+# Borehole surface T(t, z)
+print(res.T_surface.shape)
+
+# Save
+res.save('result.npz')
+```
+
+### Barrido de t_off
+
+```python
+import numpy as np
+
+t_off_values = np.linspace(1e6, 1e8, 20)
+scan = dhe.scan_toff(
+    dt=20000, t_save=100000,
+    t_on=500000, t_off_array=t_off_values,
+    tf=1000000000,
+    stab_tol=1e-9, stab_dt=100000,
+)
+
+# scan.T_borehole has shape (20, n_times, n_z)
+scan.save('scan_result.npz')
 ```
 
 ---
