@@ -4,9 +4,8 @@
 # Copy each section below into separate Colab cells.
 # =============================================================
 
-# ---- Cell 1: Install  (run ONCE, runtime restarts automatically)
-# !pip install --force-reinstall git+https://github.com/cmurillos/v0-dhe-simulator.git@thermal-simulation-library
-# import os; os.kill(os.getpid(), 9)   # force restart to pick up new deps
+# ---- Cell 1: Install  (run ONCE, then restart runtime) ------
+# !pip install git+https://github.com/cmurillos/v0-dhe-simulator.git@thermal-simulation-library
 
 # ---- Cell 2: Generate the 5-layer CSV -----------------------
 import pandas as pd
