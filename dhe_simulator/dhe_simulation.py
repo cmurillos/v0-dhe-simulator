@@ -7,28 +7,73 @@ from ._cylinder_fem_solver import CylinderFEMSolver
 from ._generador_campos import GeneradorCamposFisicos
 
 
-# ------------------------------------------------------------------
-# Result containers
-# ------------------------------------------------------------------
+def _borehole_geometry(nodes, boundary_faces, R_min, z_min):
+    """
+    Return (sel, areas, total_area) for the inner-wall faces.
+
+    sel   : (n, 3) index array of selected boundary faces
+    areas : (n,)   area of each face
+    total : float  sum of areas
+    """
+    face_pts = nodes[boundary_faces]
+    r_v = np.sqrt(face_pts[:, :, 0]**2 + face_pts[:, :, 1]**2)
+    z_v = face_pts[:, :, 2]
+    tol_r = 0.5 * R_min
+    mask = (
+        np.all(np.abs(r_v - R_min) < tol_r, axis=1) &
+        np.all(z_v >= z_min - 1e-6, axis=1)
+    )
+    if not mask.any():
+        raise RuntimeError("No borehole faces found. Check R_min / z_min.")
+    sel = boundary_faces[mask]
+    p = nodes[sel]
+    v1 = p[:, 1] - p[:, 0]
+    v2 = p[:, 2] - p[:, 0]
+    areas = 0.5 * np.linalg.norm(np.cross(v1, v2), axis=1)
+    return sel, areas, areas.sum()
+
+
+def _compute_T_mean(T_matrix, nodes, boundary_faces, R_min, z_min):
+    """
+    Area-weighted mean temperature on the borehole wall.
+
+    Parameters
+    ----------
+    T_matrix  : (N_snaps, N_nodes)
+    Returns   : (N_snaps,)
+    """
+    sel, areas, total_area = _borehole_geometry(nodes, boundary_faces,
+                                                R_min, z_min)
+    T_face = T_matrix[:, sel].mean(axis=2)           # (snaps, n)
+    return (T_face * areas[np.newaxis, :]).sum(axis=1) / total_area
+
 
 class DHEResult:
     """
-    Container for a single DHE simulation run.
+    Container for DHE simulation results.
 
     Attributes
     ----------
-    nodes, elements, boundary_faces : mesh geometry
-    R_min, z_min : borehole parameters
-    T0_stable    : stabilized initial temperature field (N_nodes,)
-    times        : saved time instants (N_snapshots,)
-    T            : temperature at every node per snapshot (N_snapshots, N_nodes)
-    z_levels     : borehole z-levels (n_z,)
-    T_surface    : angular-averaged borehole T(t, z) (N_snapshots, n_z)
+    nodes : ndarray, shape (N_nodes, 3)
+        Mesh node coordinates (x, y, z).
+    elements : ndarray, shape (N_tets, 4)
+        Tetrahedral connectivity (node indices per tetrahedron).
+    boundary_faces : ndarray, shape (N_faces, 3)
+        Triangular boundary-face connectivity.
+    R_min : float
+        Inner (borehole) radius.
+    z_min : float
+        Top of the sealed base / bottom of the open annulus.
+    T0_stable : ndarray, shape (N_nodes,)
+        Stabilized initial temperature field.
+    times : ndarray, shape (N_snapshots,)
+        Saved time instants.
+    T : ndarray, shape (N_snapshots, N_nodes)
+        Temperature at every node for each saved snapshot.
     """
 
     def __init__(self, nodes, elements, boundary_faces,
-                 R_min, z_min, T0_stable, times, T_snapshots,
-                 z_levels, T_surface):
+                 R_min, z_min, T0_stable, times, T_snapshots):
         self.nodes = np.asarray(nodes)
         self.elements = np.asarray(elements)
         self.boundary_faces = np.asarray(boundary_faces)
@@ -38,8 +83,6 @@ class DHEResult:
         self.times = np.asarray(times, dtype=float)
         self.T = np.vstack([np.asarray(s, dtype=float).ravel()
                             for s in T_snapshots])
-        self.z_levels = np.asarray(z_levels, dtype=float)
-        self.T_surface = np.asarray(T_surface, dtype=float)
 
     # dict-like access for backward compatibility
     def __getitem__(self, key):
@@ -61,8 +104,6 @@ class DHEResult:
             T0_stable=self.T0_stable,
             times=self.times,
             T=self.T,
-            z_levels=self.z_levels,
-            T_surface=self.T_surface,
         )
 
     @staticmethod
@@ -78,88 +119,37 @@ class DHEResult:
             T0_stable=data["T0_stable"],
             times=data["times"],
             T_snapshots=data["T"],
-            z_levels=data["z_levels"],
-            T_surface=data["T_surface"],
         )
+
+    def T_borehole(self):
+        """
+        Area-weighted mean temperature on the borehole wall.
+
+            T_mean(t) = sum_f A_f * T_f(t) / sum_f A_f
+
+        No parameters needed -- R_min and z_min come from the
+        simulation geometry.
+
+        Returns
+        -------
+        times : ndarray, shape (N_snapshots,)
+        T_mean : ndarray, shape (N_snapshots,)
+        """
+        Tm = _compute_T_mean(self.T, self.nodes, self.boundary_faces,
+                             self.R_min, self.z_min)
+        return self.times.copy(), Tm
 
     def __repr__(self):
         return (
             f"DHEResult(nodes={self.nodes.shape}, "
-            f"snapshots={len(self.times)}, "
-            f"T_surface={self.T_surface.shape})"
+            f"elements={self.elements.shape}, "
+            f"boundary_faces={self.boundary_faces.shape}, "
+            f"snapshots={len(self.times)})"
         )
 
-
-class ScanResult:
-    """
-    Container for a t_off sweep (scan_toff).
-
-    Attributes
-    ----------
-    t_off_array : (n_toff,)
-    times       : (n_times,)
-    z_levels    : (n_z,)
-    T_borehole  : (n_toff, n_times, n_z)  -- borehole surface per t_off
-    """
-
-    def __init__(self, t_off_array, times, z_levels, T_borehole):
-        self.t_off_array = np.asarray(t_off_array, dtype=float)
-        self.times = np.asarray(times, dtype=float)
-        self.z_levels = np.asarray(z_levels, dtype=float)
-        self.T_borehole = np.asarray(T_borehole, dtype=float)
-
-    def save(self, path):
-        """Save the scan result to a compressed .npz file."""
-        np.savez_compressed(
-            path,
-            t_off_array=self.t_off_array,
-            times=self.times,
-            z_levels=self.z_levels,
-            T_borehole=self.T_borehole,
-        )
-
-    @staticmethod
-    def load(path):
-        """Load a ScanResult from a .npz file."""
-        data = np.load(path)
-        return ScanResult(
-            t_off_array=data["t_off_array"],
-            times=data["times"],
-            z_levels=data["z_levels"],
-            T_borehole=data["T_borehole"],
-        )
-
-    def __repr__(self):
-        nt, nz = self.T_borehole.shape[1], self.T_borehole.shape[2]
-        return (
-            f"ScanResult(t_off=[{len(self.t_off_array)}], "
-            f"times={nt}, z_levels={nz})"
-        )
-
-
-# ------------------------------------------------------------------
-# Main simulation class
-# ------------------------------------------------------------------
 
 class DHE_simulation():
-    def __init__(self, csv, R_min, R_max, z_min, z_max,
-                 h, rho_f, c_f, v_f, T_in,
-                 nz=20, nr=10, nangl=15):
-        """
-        Parameters
-        ----------
-        csv   : str   -- path to CSV with physical rock properties
-        R_min : float -- borehole (inner) radius [m]
-        R_max : float -- outer radius of the domain [m]
-        z_min : float -- top of sealed base / bottom of open borehole [m]
-        z_max : float -- bottom of the borehole [m]
-        h     : float -- convective coefficient [W/(m^2 K)]
-        rho_f : float -- fluid density [kg/m^3]
-        c_f   : float -- fluid specific heat [J/(kg K)]
-        v_f   : float -- axial fluid velocity [m/s]
-        T_in  : float -- fluid inlet temperature [K]
-        nz, nr, nangl : int -- mesh resolution parameters
-        """
+    def __init__(self, csv, R_min, R_max, z_min, z_max, alpha=0.01, nz=20, nr=10, nangl=15):
         self.csv = csv
         self.R_min = R_min
         self.z_min = z_min
@@ -170,83 +160,57 @@ class DHE_simulation():
         self.cylinder = CylinderMesh(self._R_range, self._Z_range, z_min, nangl)
         print(f"({self.cylinder.nodes.shape[0]} nodes)")
 
-        self._solver = CylinderFEMSolver(
-            self.cylinder.nodes, self.cylinder.elements,
-            self.cylinder.boundary_faces)
+        self._solver = CylinderFEMSolver(self.cylinder.nodes, self.cylinder.elements, self.cylinder.boundary_faces)
 
         print("[DHE] Interpolating physical fields ...", end=" ", flush=True)
         self.p, self.c, self.k, self.T0_array = self._get_fields()
         print("done")
 
-        print("[DHE] Assembling FEM matrices + fluid model ...", end=" ", flush=True)
-        self._solver.assemble_system(
-            self.p, self.c, self.k,
-            h=h, R_min=R_min, z_min=z_min, eps=0.1,
-            rho_f=rho_f, c_f=c_f, v_f=v_f, T_in=T_in)
+        print("[DHE] Assembling FEM matrices ...", end=" ", flush=True)
+        self._solver.assemble_system(self.p, self.c, self.k, alpha, R_min, 0.1)
         print("done")
 
     def _get_fields(self):
-        gen = GeneradorCamposFisicos(
-            ruta_csv=self.csv, nodes=self._solver.skfem_nodes)
-        # gen.p, gen.c, gen.k expect (x, y, z) with arrays of shape (N,)
-        p_field = gen.p
-        c_field = gen.c
-        k_field = gen.k
-        T0 = np.array([gen.T(x, y, z)
-                        for x, y, z in self._solver.skfem_nodes])
-        return p_field, c_field, k_field, T0
+        gen = GeneradorCamposFisicos(ruta_csv=self.csv, nodes=self._solver.skfem_nodes)
+        p_field = lambda x: gen.p(*x)
+        c_field = lambda x: gen.c(*x)
+        k_field = lambda x: gen.k(*x)
+        return p_field, c_field, k_field, np.array([gen.T(*x) for x in self._solver.skfem_nodes])
 
-    def _extract_surface(self, raw):
-        """
-        From a raw solver result dict, build the borehole surface
-        T_surface(t, z) by angular-averaging at each z-level.
-
-        Returns
-        -------
-        z_levels : (n_z,)
-        T_surface : (n_snapshots, n_z)
-        """
-        rows = []
-        z_levels = None
-        for Ti in raw["T"]:
-            Ti_flat = np.asarray(Ti, dtype=float).ravel()
-            zl, Tr = self._solver.borehole_profile(Ti_flat)
-            if z_levels is None:
-                z_levels = zl
-            rows.append(Tr)
-        return z_levels, np.vstack(rows)
-
-    def solve(self, dt, t_save, t_on, t_off, tf,
+    def solve(self, dt, t_save, t_on, t_off, tf, T_c,
               stab_dt=None, stab_tol=1e-6):
         """
         Parameters
         ----------
-        dt     : float -- time step
-        t_save : float -- snapshot interval
-        t_on   : float -- start of active (Robin) window
-        t_off  : float -- end of active window
-        tf     : float -- final time
-        stab_dt : float or None -- stabilization time step (default dt)
-        stab_tol : float -- stabilization tolerance (default 1e-6)
+        dt, t_save, t_on, t_off, tf, T_c :
+            Same as before.
+        stab_dt : float or None
+            Time step for stabilization. Defaults to dt.
+        stab_tol : float
+            Relative tolerance for stabilization (default 1e-6).
         """
         if stab_dt is None:
             stab_dt = dt
 
-        # 1. Stabilize
+        # 1. Stabilize: insulated boundary until steady state
         print("[DHE] Phase 1/2 : Stabilizing initial condition ...")
         t0 = time.time()
         T0_stable, n_stab = self._solver.stabilize(
             self.T0_array, dt=stab_dt, tol=stab_tol)
         print(f"[DHE] Stabilized in {n_stab} iters ({time.time()-t0:.1f}s)")
 
-        # 2. Solve
+        # 2. Run simulation from the stable field
         print("[DHE] Phase 2/2 : Solving thermal evolution ...")
         raw = self._solver.solve(
-            T0=T0_stable, dt=dt, tf=tf,
-            t_save=t_save, t_on=t_on, t_off=t_off)
+            T0=T0_stable,
+            dt=dt,
+            tf=tf,
+            t_save=t_save,
+            T_c_func=T_c,
+            t_on=t_on,
+            t_off=t_off)
 
         T_list = [np.asarray(Ti).ravel() for Ti in raw["T"]]
-        z_levels, T_surface = self._extract_surface(raw)
 
         return DHEResult(
             nodes=self.cylinder.nodes,
@@ -257,29 +221,29 @@ class DHE_simulation():
             T0_stable=T0_stable,
             times=raw["t"],
             T_snapshots=np.vstack(T_list),
-            z_levels=z_levels,
-            T_surface=T_surface,
         )
 
-    def scan_toff(self, dt, t_save, t_on, t_off_array, tf,
+    def scan_toff(self, dt, t_save, t_on, t_off_array, tf, T_c,
                   stab_dt=None, stab_tol=1e-6):
         """
-        Run one simulation per t_off value, sharing a single
-        stabilization. Returns a ScanResult with the full
-        borehole surface T(t, z) for each t_off.
+        Run one simulation per ``t_off`` value, sharing a single
+        stabilization.
 
         Parameters
         ----------
-        dt, t_save, t_on, tf :
-            Same as solve().
+        dt, t_save, t_on, tf, T_c :
+            Same as :meth:`solve`.
         t_off_array : array-like
             Sequence of t_off values to sweep.
-        stab_dt, stab_tol :
-            Stabilization parameters.
+        stab_dt : float or None
+            Time step for stabilization.  Defaults to ``dt``.
+        stab_tol : float
+            Tolerance for stabilization (default 1e-6).
 
         Returns
         -------
-        ScanResult
+        result : ndarray, shape (N_snapshots, 1 + len(t_off_array))
+            Column 0 = times, columns 1..n = mean borehole T curves.
         """
         t_off_array = np.asarray(t_off_array, dtype=float)
         n_runs = len(t_off_array)
@@ -295,26 +259,39 @@ class DHE_simulation():
         print(f"[scan] Stabilized in {n_stab} iters "
               f"({time.time()-t0w:.1f}s)")
 
+        # Pre-compute borehole geometry once
+        sel, areas, total_area = _borehole_geometry(
+            self.cylinder.nodes, self.cylinder.boundary_faces,
+            self.R_min, self.z_min)
+
         times_ref = None
-        z_ref = None
-        surfaces = []
+        T_mean_cols = []
 
         for i, t_off in enumerate(t_off_array):
             print(f"[scan] Run {i+1}/{n_runs}  t_off={t_off:.0f}")
 
             raw = self._solver.solve(
-                T0=T0_stable, dt=dt, tf=tf,
-                t_save=t_save, t_on=t_on, t_off=t_off)
+                T0=T0_stable,
+                dt=dt,
+                tf=tf,
+                t_save=t_save,
+                T_c_func=T_c,
+                t_on=t_on,
+                t_off=t_off)
 
-            z_levels, T_surf = self._extract_surface(raw)
+            T_mat = np.vstack([np.asarray(Ti, dtype=float).ravel()
+                               for Ti in raw["T"]])
+            times_arr = np.asarray(raw["t"], dtype=float)
 
             if times_ref is None:
-                times_ref = np.asarray(raw["t"], dtype=float)
-                z_ref = z_levels
-            surfaces.append(T_surf)
+                times_ref = times_arr
 
-        T_borehole = np.stack(surfaces, axis=0)  # (n_toff, n_times, n_z)
+            # mean T on borehole wall
+            T_face = T_mat[:, sel].mean(axis=2)          # (snaps, n_faces)
+            Tm_col = (T_face * areas[np.newaxis, :]).sum(axis=1) / total_area
+            T_mean_cols.append(Tm_col)
 
-        result = ScanResult(t_off_array, times_ref, z_ref, T_borehole)
-        print(f"[scan] Done. {result}")
+        # assemble matrix:  times | T_mean_1 | ... | T_mean_n
+        result = np.column_stack([times_ref] + T_mean_cols)
+        print(f"[scan] Done. Result shape: {result.shape}")
         return result
