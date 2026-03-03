@@ -18,7 +18,7 @@ class GeneradorCamposFisicos:
     def _piecewise_generator(self,X,Y):
         X=np.asarray(np.unique([0,*X]))
         Y=np.asarray(Y)
-        return lambda x: Y[np.searchsorted(X,np.asarray(x),side="right")-1]
+        return lambda x: Y[np.clip(np.searchsorted(X,np.asarray(x),side="right")-1, 0, len(Y)-1)]
 
 
     def _generar_perfiles_fisicos(self):
