@@ -181,18 +181,20 @@ class DHE_simulation():
         print("[DHE] Assembling FEM matrices + fluid model ...", end=" ", flush=True)
         self._solver.assemble_system(
             self.p, self.c, self.k,
-            h=h, R_min=R_min, eps=0.1,
+            h=h, R_min=R_min, z_min=z_min, eps=0.1,
             rho_f=rho_f, c_f=c_f, v_f=v_f, T_in=T_in)
         print("done")
 
     def _get_fields(self):
         gen = GeneradorCamposFisicos(
             ruta_csv=self.csv, nodes=self._solver.skfem_nodes)
-        p_field = lambda x: gen.p(*x)
-        c_field = lambda x: gen.c(*x)
-        k_field = lambda x: gen.k(*x)
-        return (p_field, c_field, k_field,
-                np.array([gen.T(*x) for x in self._solver.skfem_nodes]))
+        # gen.p, gen.c, gen.k expect (x, y, z) with arrays of shape (N,)
+        p_field = gen.p
+        c_field = gen.c
+        k_field = gen.k
+        T0 = np.array([gen.T(x, y, z)
+                        for x, y, z in self._solver.skfem_nodes])
+        return p_field, c_field, k_field, T0
 
     def _extract_surface(self, raw):
         """

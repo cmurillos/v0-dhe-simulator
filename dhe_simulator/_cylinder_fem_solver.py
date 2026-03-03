@@ -51,6 +51,7 @@ class CylinderFEMSolver:
         self.R = None          # Matriz Robin de frontera
         self.h = None          # coeficiente convectivo
         self.R_min = None
+        self.z_min = None
         self.eps = None
 
         # Fluid model
@@ -64,44 +65,37 @@ class CylinderFEMSolver:
     # ------------------------------------------------------------------
     def _wrap_field_function(self, func):
         """
-        Envuelve una función de campo para que siempre acepte w.x de skfem
-        (array de forma (3, N)).
+        Envuelve una funcion de campo para que siempre acepte w.x de
+        skfem (array de forma (3, N)) y devuelva un array 1-D (N,).
 
         Soporta:
-          - f(x, y, z)       con x, y, z arrays de forma (N,)  [GeneradorCamposFisicos]
-          - f(coords)         con coords de forma (3, N)
+          - f(x, y, z)  con x, y, z arrays de forma (N,)
+          - f(coords)    con coords de forma (3, N)
         """
         def wrapped(coords):
             N = coords.shape[1]
             x, y, z = coords[0], coords[1], coords[2]
-            # Intentar primero f(x, y, z) — patron de GeneradorCamposFisicos
             try:
                 result = func(x, y, z)
             except TypeError:
-                # Fallback: f(coords) con coords de forma (3, N)
                 result = func(coords)
 
             if np.isscalar(result):
-                return np.full((N, 1), float(result)) # Reshape to (N, 1) for broadcasting
-            result = np.asarray(result, dtype=float)
-            if result.ndim == 1: # If it's a 1D array (N,), reshape to (N, 1)
-                return result.reshape(-1, 1)
-            elif result.ndim == 2 and result.shape[1] == 1:
-                return result # Already (N, 1)
-            elif result.ndim == 2 and result.shape[0] == N:
-                # If it's (N, M) where M > 1, this implies the func returns multiple values per point.
-                # For scalar coefficients, it should be (N, 1).
-                # Assuming the first column is the intended scalar value if such a case occurs.
-                return result[:, 0].reshape(-1, 1)
-            else:
-                raise ValueError(f"Wrapped function returned incompatible shape {result.shape} for N={N}. Expected (N,) or (N,1).")
+                return np.full(N, float(result))
+            result = np.asarray(result, dtype=float).ravel()
+            if result.shape[0] != N:
+                raise ValueError(
+                    f"Wrapped function returned {result.shape[0]} values "
+                    f"for {N} points."
+                )
+            return result
         return wrapped
 
     # ------------------------------------------------------------------
     # Ensamblaje
     # ------------------------------------------------------------------
     def assemble_system(self, p_func, c_func, k_func,
-                        h, R_min, eps,
+                        h, R_min, z_min, eps,
                         rho_f, c_f, v_f, T_in):
         """
         Ensambla las matrices de masa M, rigidez K, y Robin R,
@@ -114,6 +108,7 @@ class CylinderFEMSolver:
         k_func : callable   -- conductividad termica roca k(x)
         h      : float      -- coeficiente convectivo interno [W/(m^2 K)]
         R_min  : float      -- radio del pozo (frontera interior)
+        z_min  : float      -- profundidad superior del pozo abierto [m]
         eps    : float      -- tolerancia geometrica para caras interiores
         rho_f  : float      -- densidad del fluido [kg/m^3]
         c_f    : float      -- calor especifico del fluido [J/(kg K)]
@@ -122,6 +117,7 @@ class CylinderFEMSolver:
         """
         self.h = h
         self.R_min = R_min
+        self.z_min = z_min
         self.eps = eps
         self.T_in = T_in
         self.beta = 2.0 * h / (rho_f * R_min * v_f * c_f)
@@ -155,19 +151,24 @@ class CylinderFEMSolver:
 
     def _build_borehole_groups(self):
         """
-        Identify mesh nodes on the borehole wall (r ~ R_min, z >= z_min
-        where z_min is inferred as the smallest z among those nodes)
-        and group them by z-level for fast angular averaging.
+        Identify mesh nodes on the borehole wall (r ~ R_min and
+        z >= z_min) and group them by z-level for fast angular
+        averaging.
         """
         nodes = self.skfem_nodes
         r = np.sqrt(nodes[:, 0]**2 + nodes[:, 1]**2)
         tol_r = 0.5 * self.R_min
-        bh_mask = np.abs(r - self.R_min) < tol_r
+        bh_mask = (np.abs(r - self.R_min) < tol_r) & \
+                  (nodes[:, 2] >= self.z_min - 1e-6)
 
         bh_indices = np.where(bh_mask)[0]
-        bh_z = nodes[bh_indices, 2]
+        if len(bh_indices) == 0:
+            raise RuntimeError(
+                f"No borehole nodes found (R_min={self.R_min}, "
+                f"z_min={self.z_min}). Check geometry."
+            )
 
-        # round to avoid floating-point duplicates
+        bh_z = nodes[bh_indices, 2]
         decimals = 6
         bh_z_rounded = np.round(bh_z, decimals)
         unique_z = np.unique(bh_z_rounded)
@@ -176,7 +177,7 @@ class CylinderFEMSolver:
         for z_val in unique_z:
             groups[z_val] = bh_indices[bh_z_rounded == z_val]
 
-        self._bh_z_levels = unique_z          # sorted
+        self._bh_z_levels = unique_z          # sorted ascending
         self._bh_node_groups = groups
 
     def borehole_profile(self, T_field):
@@ -203,8 +204,13 @@ class CylinderFEMSolver:
         Compute the fluid temperature T_f(z) at each borehole z-level
         given the current rock temperature field T_current.
 
-        Uses trapezoidal integration of:
-            T_f(z) = e^{-beta z} T_in + beta int_0^z e^{-beta(z-s)} T_r(s) ds
+        The fluid enters at z = z_min with temperature T_in and flows
+        downward.  Using the substitution  zeta = z - z_min :
+
+            T_f(z) = e^{-beta*zeta} T_in
+                   + beta int_{z_min}^{z} e^{-beta(z-s)} T_r(s) ds
+
+        Trapezoidal quadrature is used for the integral.
 
         Returns
         -------
@@ -214,31 +220,25 @@ class CylinderFEMSolver:
         z = self._bh_z_levels
         n = len(z)
         beta = self.beta
+        z0 = z[0]   # == z_min (first borehole z-level)
 
         # T_r(z) = simple average of T at borehole nodes at each z
         Tr = np.empty(n)
         for i, zv in enumerate(z):
-            idx = self._bh_node_groups[zv]
-            Tr[i] = T_current[idx].mean()
+            Tr[i] = T_current[self._bh_node_groups[zv]].mean()
 
-        # Trapezoidal integration of  beta * int_0^z e^{-beta(z-s)} Tr(s) ds
+        # Trapezoidal integration with zeta = z - z0
         Tf = np.empty(n)
-        Tf[0] = np.exp(-beta * z[0]) * self.T_in
-        # add contribution from integrand at s=0: Tr(z[0]) weighted
-        if n > 0:
-            integral = 0.0
-            for i in range(n):
-                exp_z = np.exp(-beta * z[i])
-                if i == 0:
-                    integral = 0.0
-                else:
-                    dz = z[i] - z[i - 1]
-                    # trapezoidal: f(s_{i-1}) and f(s_i)
-                    # integrand at s: e^{beta*s} * Tr(s)
-                    f_prev = np.exp(beta * z[i - 1]) * Tr[i - 1]
-                    f_curr = np.exp(beta * z[i]) * Tr[i]
-                    integral += 0.5 * dz * (f_prev + f_curr)
-                Tf[i] = exp_z * self.T_in + beta * exp_z * integral
+        integral = 0.0
+        for i in range(n):
+            zeta_i = z[i] - z0
+            exp_zi = np.exp(-beta * zeta_i)
+            if i > 0:
+                dz = z[i] - z[i - 1]
+                f_prev = np.exp(beta * (z[i - 1] - z0)) * Tr[i - 1]
+                f_curr = np.exp(beta * (z[i]     - z0)) * Tr[i]
+                integral += 0.5 * dz * (f_prev + f_curr)
+            Tf[i] = exp_zi * self.T_in + beta * exp_zi * integral
 
         return z, Tf
 
