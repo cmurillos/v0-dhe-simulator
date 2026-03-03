@@ -13,9 +13,9 @@ setup(
     packages=find_packages(),
     python_requires=">=3.9",
     install_requires=[
-        "numpy>=1.22,<2.2",
-        "scipy>=1.9,<1.17",
-        "pandas>=1.5,<3.0",
+        "numpy>=1.22",
+        "scipy>=1.9",
+        "pandas>=1.5",
         "matplotlib>=3.5",
         "scikit-fem>=8.0",
     ],
