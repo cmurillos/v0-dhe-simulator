@@ -24,16 +24,17 @@ def _bar(fraction, width=30):
 
 class CylinderFEMSolver:
     """
-    Solver FEM para la ecuación de calor en mallas cilíndricas con condición
-    de frontera tipo Robin:
+    Solver FEM para la ecuacion de calor en mallas cilindricas con condicion
+    de frontera tipo Robin y modelo de fluido convectivo interno:
 
-        -k * grad(T) · n = alpha(t,x) * (T - T_c(t,x))
+        -k grad(T).n = h (T_rock - T_f)
 
-    donde alpha(t,x) = alpha_val  si x1²+x2² <= (R_min+eps)² y t_on < t < t_off,
-                      = 0          en otro caso.
+    donde T_f(t,z) se calcula a partir de la temperatura promedio de
+    la roca en la pared del pozo usando:
 
-    Compatible con funciones lambda f(x) (x array (3,N))
-    y con funciones de GeneradorCamposFisicos f(x, y, z).
+        T_f(z) = e^{-beta*z} T_in + beta int_0^z e^{-beta(z-s)} T_r(s) ds
+
+    con beta = 2h / (rho_f * R * v_f * c_f).
     """
 
     def __init__(self, nodes, elements, boundary_faces):
@@ -48,9 +49,15 @@ class CylinderFEMSolver:
         self.M = None
         self.K = None
         self.R = None          # Matriz Robin de frontera
-        self.alpha_val = None
+        self.h = None          # coeficiente convectivo
         self.R_min = None
         self.eps = None
+
+        # Fluid model
+        self.beta = None
+        self.T_in = None
+        self._bh_z_levels = None   # sorted unique z-levels on borehole
+        self._bh_node_groups = None  # dict: z_level -> list of node indices
 
     # ------------------------------------------------------------------
     # Wrappers para compatibilidad con GeneradorCamposFisicos
@@ -90,50 +97,34 @@ class CylinderFEMSolver:
                 raise ValueError(f"Wrapped function returned incompatible shape {result.shape} for N={N}. Expected (N,) or (N,1).")
         return wrapped
 
-    def _wrap_Tc_function(self, T_c_func, t):
-        """
-        Envuelve T_c(t, …) en una función solo espacial para un instante t fijo.
-
-        Soporta:
-          - T_c(t, coords)      con coords de forma (3, N)
-          - T_c(t, x, y, z)     con x, y, z arrays de forma (N,)
-        """
-        def wrapped(coords):
-            try:
-                result = T_c_func(t, coords)
-                if np.isscalar(result):
-                    return np.full(coords.shape[1], float(result))
-                result = np.asarray(result, dtype=float)
-                if result.shape == (coords.shape[1],):
-                    return result
-                raise ValueError
-            except (TypeError, IndexError, ValueError):
-                x, y, z = coords[0], coords[1], coords[2]
-                result = T_c_func(t, x, y, z)
-                if np.isscalar(result):
-                    return np.full(len(x), float(result))
-                return np.asarray(result, dtype=float)
-        return wrapped
-
     # ------------------------------------------------------------------
     # Ensamblaje
     # ------------------------------------------------------------------
-    def assemble_system(self, p_func, c_func, k_func, alpha_val, R_min, eps):
+    def assemble_system(self, p_func, c_func, k_func,
+                        h, R_min, eps,
+                        rho_f, c_f, v_f, T_in):
         """
-        Ensambla las matrices de masa M, rigidez K, y Robin R.
+        Ensambla las matrices de masa M, rigidez K, y Robin R,
+        y configura el modelo de fluido convectivo.
 
-        Parámetros
+        Parametros
         ----------
-        p_func : callable   – densidad ρ(x)
-        c_func : callable   – capacidad calorífica c(x)
-        k_func : callable   – conductividad térmica k(x)
-        alpha_val : float    – valor constante de α en la región activa
-        R_min : float        – radio mínimo (frontera interior)
-        eps : float          – tolerancia para seleccionar caras interiores
+        p_func : callable   -- densidad roca rho(x)
+        c_func : callable   -- capacidad calorifica roca c(x)
+        k_func : callable   -- conductividad termica roca k(x)
+        h      : float      -- coeficiente convectivo interno [W/(m^2 K)]
+        R_min  : float      -- radio del pozo (frontera interior)
+        eps    : float      -- tolerancia geometrica para caras interiores
+        rho_f  : float      -- densidad del fluido [kg/m^3]
+        c_f    : float      -- calor especifico del fluido [J/(kg K)]
+        v_f    : float      -- velocidad axial del fluido [m/s]
+        T_in   : float      -- temperatura de entrada del fluido [K]
         """
-        self.alpha_val = alpha_val
+        self.h = h
         self.R_min = R_min
         self.eps = eps
+        self.T_in = T_in
+        self.beta = 2.0 * h / (rho_f * R_min * v_f * c_f)
 
         p_w = self._wrap_field_function(p_func)
         c_w = self._wrap_field_function(c_func)
@@ -153,27 +144,113 @@ class CylinderFEMSolver:
         def robin(u, v, w):
             r2 = w.x[0] ** 2 + w.x[1] ** 2
             mask = (r2 <= r_threshold_sq).astype(float)
-            return alpha_val * mask * u * v
+            return h * mask * u * v
 
         self.M = asm(mass, self.basis).tocsc()
         self.K = asm(stiffness, self.basis).tocsc()
         self.R = asm(robin, self.boundary_basis).tocsc()
 
-    def _assemble_robin_load(self, t, T_c_func):
-        """
-        Ensambla el vector de carga Robin en el instante t:
+        # Pre-compute borehole node groups by z-level
+        self._build_borehole_groups()
 
-            F_robin = ∫_∂Ω α(x) · T_c(t, x) · v  dS
+    def _build_borehole_groups(self):
         """
-        Tc_w = self._wrap_Tc_function(T_c_func, t)
+        Identify mesh nodes on the borehole wall (r ~ R_min, z >= z_min
+        where z_min is inferred as the smallest z among those nodes)
+        and group them by z-level for fast angular averaging.
+        """
+        nodes = self.skfem_nodes
+        r = np.sqrt(nodes[:, 0]**2 + nodes[:, 1]**2)
+        tol_r = 0.5 * self.R_min
+        bh_mask = np.abs(r - self.R_min) < tol_r
+
+        bh_indices = np.where(bh_mask)[0]
+        bh_z = nodes[bh_indices, 2]
+
+        # round to avoid floating-point duplicates
+        decimals = 6
+        bh_z_rounded = np.round(bh_z, decimals)
+        unique_z = np.unique(bh_z_rounded)
+
+        groups = {}
+        for z_val in unique_z:
+            groups[z_val] = bh_indices[bh_z_rounded == z_val]
+
+        self._bh_z_levels = unique_z          # sorted
+        self._bh_node_groups = groups
+
+    def _compute_Tf(self, T_current):
+        """
+        Compute the fluid temperature T_f(z) at each borehole z-level
+        given the current rock temperature field T_current.
+
+        Uses trapezoidal integration of:
+            T_f(z) = e^{-beta z} T_in + beta int_0^z e^{-beta(z-s)} T_r(s) ds
+
+        Returns
+        -------
+        z_levels : ndarray (n_levels,)
+        Tf_vals  : ndarray (n_levels,)
+        """
+        z = self._bh_z_levels
+        n = len(z)
+        beta = self.beta
+
+        # T_r(z) = simple average of T at borehole nodes at each z
+        Tr = np.empty(n)
+        for i, zv in enumerate(z):
+            idx = self._bh_node_groups[zv]
+            Tr[i] = T_current[idx].mean()
+
+        # Trapezoidal integration of  beta * int_0^z e^{-beta(z-s)} Tr(s) ds
+        Tf = np.empty(n)
+        Tf[0] = np.exp(-beta * z[0]) * self.T_in
+        # add contribution from integrand at s=0: Tr(z[0]) weighted
+        if n > 0:
+            integral = 0.0
+            for i in range(n):
+                exp_z = np.exp(-beta * z[i])
+                if i == 0:
+                    integral = 0.0
+                else:
+                    dz = z[i] - z[i - 1]
+                    # trapezoidal: f(s_{i-1}) and f(s_i)
+                    # integrand at s: e^{beta*s} * Tr(s)
+                    f_prev = np.exp(beta * z[i - 1]) * Tr[i - 1]
+                    f_curr = np.exp(beta * z[i]) * Tr[i]
+                    integral += 0.5 * dz * (f_prev + f_curr)
+                Tf[i] = exp_z * self.T_in + beta * exp_z * integral
+
+        return z, Tf
+
+    def _assemble_robin_load_fluid(self, T_current):
+        """
+        Ensambla el vector de carga Robin usando el modelo de fluido:
+
+            F_robin = integral_dOmega h * T_f(x) * v  dS
+
+        donde T_f se calcula internamente a partir de T_current.
+        """
+        z_levels, Tf_vals = self._compute_Tf(T_current)
+
+        # Build interpolator: for any z, get T_f by nearest z-level
+        from scipy.interpolate import interp1d
+        if len(z_levels) > 1:
+            Tf_interp = interp1d(z_levels, Tf_vals,
+                                 kind='linear', fill_value='extrapolate')
+        else:
+            Tf_interp = lambda z: np.full_like(np.asarray(z, dtype=float),
+                                                Tf_vals[0])
+
         r_threshold_sq = (self.R_min + self.eps) ** 2
-        alpha_val = self.alpha_val
+        h_val = self.h
 
         @LinearForm
         def robin_load(v, w):
             r2 = w.x[0] ** 2 + w.x[1] ** 2
             mask = (r2 <= r_threshold_sq).astype(float)
-            return alpha_val * mask * Tc_w(w.x) * v
+            Tf_at_z = Tf_interp(w.x[2])
+            return h_val * mask * Tf_at_z * v
 
         return asm(robin_load, self.boundary_basis)
 
@@ -264,32 +341,34 @@ class CylinderFEMSolver:
     # ------------------------------------------------------------------
     # Resolución temporal
     # ------------------------------------------------------------------
-    def solve(self, T0, dt, tf, t_save, T_c_func, t_on, t_off):
+    def solve(self, T0, dt, tf, t_save, t_on, t_off):
         """
-        Resuelve la ecuación de calor con condición Robin activa en [t_on, t_off]:
+        Resuelve la ecuacion de calor con condicion Robin activa en
+        [t_on, t_off] usando el modelo de fluido convectivo interno:
 
-            ρ c ∂T/∂t = div(k grad T)
-            -k grad(T)·n = α(t,x)(T - T_c(t,x))   en ∂Ω
+            rho c dT/dt = div(k grad T)
+            -k grad(T).n = h (T_rock - T_f(z))   en la pared del pozo
 
-        Euler implícito:
-          ● Activo  (t_on < t < t_off):
-              (M + dt·K + dt·R) T^{n+1} = M·T^n + dt·F_robin(t^{n+1})
-          ● Inactivo (frontera aislada):
-              (M + dt·K) T^{n+1} = M·T^n
+        donde T_f(z) se calcula internamente a partir de T_rock.
 
-        Parámetros
+        Euler implicito:
+          - Activo  (t_on < t < t_off):
+              (M + dt*K + dt*R) T^{n+1} = M*T^n + dt*F_robin(T^n)
+          - Inactivo (frontera aislada):
+              (M + dt*K) T^{n+1} = M*T^n
+
+        Parametros
         ----------
-        T0       : ndarray  – temperatura inicial en cada nodo
-        dt       : float    – paso de tiempo
-        Tf       : float    – tiempo final
-        t_save   : float    – intervalo de guardado de resultados
-        T_c_func : callable – T_c(t, x, y, z)  o  T_c(t, coords)
-        t_on     : float    – inicio de la ventana activa
-        t_off    : float    – fin de la ventana activa
+        T0     : ndarray  -- temperatura inicial en cada nodo
+        dt     : float    -- paso de tiempo
+        tf     : float    -- tiempo final
+        t_save : float    -- intervalo de guardado
+        t_on   : float    -- inicio de la ventana activa
+        t_off  : float    -- fin de la ventana activa
 
         Retorna
         -------
-        dict  con claves 't' (lista de tiempos) y 'T' (lista de arrays de temperatura).
+        dict con claves 't' (lista de tiempos) y 'T' (lista de arrays).
         """
         if self.M is None or self.K is None or self.R is None:
             raise RuntimeError(
@@ -317,7 +396,7 @@ class CylinderFEMSolver:
             step += 1
 
             if t_on < t_next < t_off:
-                F_robin = self._assemble_robin_load(t_next, T_c_func)
+                F_robin = self._assemble_robin_load_fluid(T)
                 b = self.M @ T + dt * F_robin
                 T = np.asarray(solve_active(b)).ravel()
             else:

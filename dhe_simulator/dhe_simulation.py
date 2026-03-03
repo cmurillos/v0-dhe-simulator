@@ -149,7 +149,24 @@ class DHEResult:
 
 
 class DHE_simulation():
-    def __init__(self, csv, R_min, R_max, z_min, z_max, alpha=0.01, nz=20, nr=10, nangl=15):
+    def __init__(self, csv, R_min, R_max, z_min, z_max,
+                 h, rho_f, c_f, v_f, T_in,
+                 nz=20, nr=10, nangl=15):
+        """
+        Parameters
+        ----------
+        csv   : str   -- path to CSV with physical rock properties
+        R_min : float -- borehole (inner) radius [m]
+        R_max : float -- outer radius of the domain [m]
+        z_min : float -- top of sealed base / bottom of open borehole [m]
+        z_max : float -- bottom of the borehole [m]
+        h     : float -- convective coefficient [W/(m^2 K)]
+        rho_f : float -- fluid density [kg/m^3]
+        c_f   : float -- fluid specific heat [J/(kg K)]
+        v_f   : float -- axial fluid velocity [m/s]
+        T_in  : float -- fluid inlet temperature [K]
+        nz, nr, nangl : int -- mesh resolution parameters
+        """
         self.csv = csv
         self.R_min = R_min
         self.z_min = z_min
@@ -166,8 +183,11 @@ class DHE_simulation():
         self.p, self.c, self.k, self.T0_array = self._get_fields()
         print("done")
 
-        print("[DHE] Assembling FEM matrices ...", end=" ", flush=True)
-        self._solver.assemble_system(self.p, self.c, self.k, alpha, R_min, 0.1)
+        print("[DHE] Assembling FEM matrices + fluid model ...", end=" ", flush=True)
+        self._solver.assemble_system(
+            self.p, self.c, self.k,
+            h=h, R_min=R_min, eps=0.1,
+            rho_f=rho_f, c_f=c_f, v_f=v_f, T_in=T_in)
         print("done")
 
     def _get_fields(self):
@@ -177,17 +197,18 @@ class DHE_simulation():
         k_field = lambda x: gen.k(*x)
         return p_field, c_field, k_field, np.array([gen.T(*x) for x in self._solver.skfem_nodes])
 
-    def solve(self, dt, t_save, t_on, t_off, tf, T_c,
+    def solve(self, dt, t_save, t_on, t_off, tf,
               stab_dt=None, stab_tol=1e-6):
         """
         Parameters
         ----------
-        dt, t_save, t_on, t_off, tf, T_c :
-            Same as before.
-        stab_dt : float or None
-            Time step for stabilization. Defaults to dt.
-        stab_tol : float
-            Relative tolerance for stabilization (default 1e-6).
+        dt     : float -- time step
+        t_save : float -- snapshot interval
+        t_on   : float -- start of active (Robin) window
+        t_off  : float -- end of active window
+        tf     : float -- final time
+        stab_dt : float or None -- time step for stabilization (default dt)
+        stab_tol : float -- stabilization tolerance (default 1e-6)
         """
         if stab_dt is None:
             stab_dt = dt
@@ -206,7 +227,6 @@ class DHE_simulation():
             dt=dt,
             tf=tf,
             t_save=t_save,
-            T_c_func=T_c,
             t_on=t_on,
             t_off=t_off)
 
@@ -223,7 +243,7 @@ class DHE_simulation():
             T_snapshots=np.vstack(T_list),
         )
 
-    def scan_toff(self, dt, t_save, t_on, t_off_array, tf, T_c,
+    def scan_toff(self, dt, t_save, t_on, t_off_array, tf,
                   stab_dt=None, stab_tol=1e-6):
         """
         Run one simulation per ``t_off`` value, sharing a single
@@ -231,14 +251,12 @@ class DHE_simulation():
 
         Parameters
         ----------
-        dt, t_save, t_on, tf, T_c :
+        dt, t_save, t_on, tf :
             Same as :meth:`solve`.
         t_off_array : array-like
             Sequence of t_off values to sweep.
-        stab_dt : float or None
-            Time step for stabilization.  Defaults to ``dt``.
-        stab_tol : float
-            Tolerance for stabilization (default 1e-6).
+        stab_dt, stab_tol :
+            Stabilization parameters.
 
         Returns
         -------
@@ -275,7 +293,6 @@ class DHE_simulation():
                 dt=dt,
                 tf=tf,
                 t_save=t_save,
-                T_c_func=T_c,
                 t_on=t_on,
                 t_off=t_off)
 
