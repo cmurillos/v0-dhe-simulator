@@ -65,15 +65,17 @@ class CylinderFEMSolver:
     # ------------------------------------------------------------------
     def _wrap_field_function(self, func):
         """
-        Envuelve una funcion de campo para que siempre acepte w.x de
-        skfem (array de forma (3, N)) y devuelva un array 1-D (N,).
+        Envuelve una funcion de campo para que acepte w.x de skfem.
+
+        w.x puede tener forma (3, N) en contextos simples o
+        (3, n_qp, n_elem) dentro de BilinearForm / LinearForm.
+        El resultado se devuelve con la misma forma que x, y, z.
 
         Soporta:
-          - f(x, y, z)  con x, y, z arrays de forma (N,)
-          - f(coords)    con coords de forma (3, N)
+          - f(x, y, z)  con x, y, z arrays
+          - f(coords)    con coords de forma (3, ...)
         """
         def wrapped(coords):
-            N = coords.shape[1]
             x, y, z = coords[0], coords[1], coords[2]
             try:
                 result = func(x, y, z)
@@ -81,13 +83,10 @@ class CylinderFEMSolver:
                 result = func(coords)
 
             if np.isscalar(result):
-                return np.full(N, float(result))
-            result = np.asarray(result, dtype=float).ravel()
-            if result.shape[0] != N:
-                raise ValueError(
-                    f"Wrapped function returned {result.shape[0]} values "
-                    f"for {N} points."
-                )
+                return np.full_like(x, float(result))
+            result = np.asarray(result, dtype=float)
+            if result.shape != x.shape:
+                result = np.broadcast_to(result, x.shape)
             return result
         return wrapped
 
