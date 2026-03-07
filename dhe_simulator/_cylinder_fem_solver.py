@@ -178,6 +178,37 @@ class CylinderFEMSolver:
         return asm(robin_load, self.boundary_basis)
 
     # ------------------------------------------------------------------
+    # Borehole profile extraction
+    # ------------------------------------------------------------------
+    def build_borehole_groups(self, R_min, z_min):
+        """
+        Identify borehole nodes (r ~ R_min, z >= z_min) and group by z-level.
+        Must be called before borehole_profile().
+        """
+        nodes = self.skfem_nodes
+        r = np.sqrt(nodes[:, 0]**2 + nodes[:, 1]**2)
+        tol_r = 0.5 * R_min
+        bh_mask = (np.abs(r - R_min) < tol_r) & (nodes[:, 2] >= z_min - 1e-6)
+        bh_indices = np.where(bh_mask)[0]
+        if len(bh_indices) == 0:
+            raise RuntimeError(f"No borehole nodes found (R_min={R_min}, z_min={z_min})")
+        bh_z = nodes[bh_indices, 2]
+        bh_z_rounded = np.round(bh_z, 6)
+        unique_z = np.unique(bh_z_rounded)
+        groups = {zv: bh_indices[bh_z_rounded == zv] for zv in unique_z}
+        self._bh_z_levels = unique_z
+        self._bh_node_groups = groups
+
+    def borehole_profile(self, T_field):
+        """
+        Angular-average temperature on the borehole at each z-level.
+        Returns (z_levels, T_r) both 1D arrays.
+        """
+        z = self._bh_z_levels
+        Tr = np.array([T_field[self._bh_node_groups[zv]].mean() for zv in z])
+        return z, Tr
+
+    # ------------------------------------------------------------------
     # Estabilización (frontera aislada)
     # ------------------------------------------------------------------
     def stabilize(self, T0, dt, tol=1e-6, max_iter=100000):

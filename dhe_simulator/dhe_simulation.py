@@ -153,6 +153,7 @@ class DHE_simulation():
         self.csv = csv
         self.R_min = R_min
         self.z_min = z_min
+        self.alpha = alpha
         self._R_range = np.linspace(R_min, R_max, nr)
         self._Z_range = np.linspace(0, z_max, nz)
 
@@ -170,12 +171,20 @@ class DHE_simulation():
         self._solver.assemble_system(self.p, self.c, self.k, alpha, R_min, 0.1)
         print("done")
 
+        # Build borehole node groups for profile extraction
+        self._solver.build_borehole_groups(R_min, z_min)
+
     def _get_fields(self):
         gen = GeneradorCamposFisicos(ruta_csv=self.csv, nodes=self._solver.skfem_nodes)
         p_field = lambda x: gen.p(*x)
         c_field = lambda x: gen.c(*x)
         k_field = lambda x: gen.k(*x)
         return p_field, c_field, k_field, np.array([gen.T(*x) for x in self._solver.skfem_nodes])
+
+    def _regenerate_fields(self):
+        """Regenerate random fields and reassemble FEM matrices."""
+        self.p, self.c, self.k, self.T0_array = self._get_fields()
+        self._solver.assemble_system(self.p, self.c, self.k, self.alpha, self.R_min, 0.1)
 
     def solve(self, dt, t_save, t_on, t_off, tf, T_c,
               stab_dt=None, stab_tol=1e-6):
@@ -224,10 +233,10 @@ class DHE_simulation():
         )
 
     def scan_toff(self, dt, t_save, t_on, t_off_array, tf, T_c,
-                  stab_dt=None, stab_tol=1e-6):
+                  tries=1, stab_dt=None, stab_tol=1e-6):
         """
-        Run one simulation per ``t_off`` value, sharing a single
-        stabilization.
+        Run simulations for multiple t_off values and multiple random
+        field realizations (tries).
 
         Parameters
         ----------
@@ -235,63 +244,77 @@ class DHE_simulation():
             Same as :meth:`solve`.
         t_off_array : array-like
             Sequence of t_off values to sweep.
-        stab_dt : float or None
-            Time step for stabilization.  Defaults to ``dt``.
-        stab_tol : float
-            Tolerance for stabilization (default 1e-6).
+        tries : int
+            Number of random field realizations to simulate.
+        stab_dt, stab_tol :
+            Stabilization parameters.
 
         Returns
         -------
-        result : ndarray, shape (N_snapshots, 1 + len(t_off_array))
-            Column 0 = times, columns 1..n = mean borehole T curves.
+        dict with keys:
+            'times'   : ndarray (n_times,)
+            'z_levels': ndarray (n_z,)
+            't_off'   : ndarray (n_toff,)
+            'T'       : ndarray (tries, n_toff, n_times, n_z)
+                        Borehole surface T(t,z) for each try and t_off.
         """
         t_off_array = np.asarray(t_off_array, dtype=float)
-        n_runs = len(t_off_array)
+        n_toff = len(t_off_array)
 
         if stab_dt is None:
             stab_dt = dt
 
-        # 1. Stabilize once
-        print(f"[scan] Phase 1/{n_runs+1} : Stabilizing ...")
-        t0w = time.time()
-        T0_stable, n_stab = self._solver.stabilize(
-            self.T0_array, dt=stab_dt, tol=stab_tol)
-        print(f"[scan] Stabilized in {n_stab} iters "
-              f"({time.time()-t0w:.1f}s)")
-
-        # Pre-compute borehole geometry once
-        sel, areas, total_area = _borehole_geometry(
-            self.cylinder.nodes, self.cylinder.boundary_faces,
-            self.R_min, self.z_min)
-
+        z_levels = self._solver._bh_z_levels
+        n_z = len(z_levels)
         times_ref = None
-        T_mean_cols = []
+        all_results = []  # list of (n_toff, n_times, n_z) per try
 
-        for i, t_off in enumerate(t_off_array):
-            print(f"[scan] Run {i+1}/{n_runs}  t_off={t_off:.0f}")
+        for tr in range(tries):
+            print(f"\n[scan] === Try {tr+1}/{tries} ===")
 
-            raw = self._solver.solve(
-                T0=T0_stable,
-                dt=dt,
-                tf=tf,
-                t_save=t_save,
-                T_c_func=T_c,
-                t_on=t_on,
-                t_off=t_off)
+            if tr > 0:
+                print("[scan] Regenerating random fields ...")
+                self._regenerate_fields()
 
-            T_mat = np.vstack([np.asarray(Ti, dtype=float).ravel()
-                               for Ti in raw["T"]])
-            times_arr = np.asarray(raw["t"], dtype=float)
+            # Stabilize for this field realization
+            print("[scan] Stabilizing ...")
+            T0_stable, n_stab = self._solver.stabilize(
+                self.T0_array, dt=stab_dt, tol=stab_tol)
+            print(f"[scan] Stabilized in {n_stab} iters")
 
-            if times_ref is None:
-                times_ref = times_arr
+            try_results = []  # (n_toff, n_times, n_z)
 
-            # mean T on borehole wall
-            T_face = T_mat[:, sel].mean(axis=2)          # (snaps, n_faces)
-            Tm_col = (T_face * areas[np.newaxis, :]).sum(axis=1) / total_area
-            T_mean_cols.append(Tm_col)
+            for i, t_off in enumerate(t_off_array):
+                print(f"[scan] t_off {i+1}/{n_toff} = {t_off:.2e}")
 
-        # assemble matrix:  times | T_mean_1 | ... | T_mean_n
-        result = np.column_stack([times_ref] + T_mean_cols)
-        print(f"[scan] Done. Result shape: {result.shape}")
-        return result
+                raw = self._solver.solve(
+                    T0=T0_stable,
+                    dt=dt,
+                    tf=tf,
+                    t_save=t_save,
+                    T_c_func=T_c,
+                    t_on=t_on,
+                    t_off=t_off)
+
+                times_arr = np.asarray(raw["t"], dtype=float)
+                if times_ref is None:
+                    times_ref = times_arr
+
+                # Extract borehole profile T(z) at each time snapshot
+                T_surface = []  # (n_times, n_z)
+                for T_snap in raw["T"]:
+                    _, Tr = self._solver.borehole_profile(np.asarray(T_snap).ravel())
+                    T_surface.append(Tr)
+                try_results.append(np.array(T_surface))  # (n_times, n_z)
+
+            all_results.append(np.array(try_results))  # (n_toff, n_times, n_z)
+
+        T_tensor = np.array(all_results)  # (tries, n_toff, n_times, n_z)
+        print(f"\n[scan] Done. T shape: {T_tensor.shape}")
+
+        return {
+            'times': times_ref,
+            'z_levels': z_levels,
+            't_off': t_off_array,
+            'T': T_tensor,
+        }

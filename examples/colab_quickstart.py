@@ -61,30 +61,40 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 
-# ---- Cell 7: scan_toff  -- sweep multiple t_off values ------
-# Stabilizes only once, then runs one simulation per t_off.
-# Returns a matrix: column 0 = times, columns 1..n = mean T curves.
+# ---- Cell 7: scan_toff  -- sweep t_off with multiple tries --
+# Returns a dict with 'times', 'z_levels', 't_off', and 'T' tensor
+# T shape: (tries, n_toff, n_times, n_z)
 
 t_off_values = [800000, 1000000, 1200000, 1500000]
 
-table = dhe.scan_toff(
+result = dhe.scan_toff(
     dt=20000,
     t_save=80000,
     t_on=600000,
     t_off_array=t_off_values,
     tf=2000000,
     T_c=T_c,
+    tries=3,  # number of random field realizations
 )
 
-# table[:, 0] = times,  table[:, i+1] = mean T for t_off_values[i]
-plt.figure()
-for i, toff in enumerate(t_off_values):
-    plt.plot(table[:, 0], table[:, i + 1], '-o',
-             label=f't_off={toff:.0f}')
+print("times shape:", result['times'].shape)
+print("z_levels shape:", result['z_levels'].shape)
+print("T tensor shape:", result['T'].shape)  # (tries, n_toff, n_times, n_z)
+
+# ---- Cell 8: Save scan results ------------------------------
+np.savez_compressed('scan_results.npz', **result)
+
+# ---- Cell 9: Visualize one realization ----------------------
+# Plot T(t,z) heatmap for first try, first t_off
+T_surface = result['T'][0, 0]  # (n_times, n_z)
+times = result['times']
+z = result['z_levels']
+
+plt.figure(figsize=(10, 6))
+plt.pcolormesh(times, z, T_surface.T, shading='auto', cmap='hot')
+plt.colorbar(label='T [K]')
 plt.xlabel('Time [s]')
-plt.ylabel('Mean T [K]')
-plt.title('Borehole mean temperature for different t_off')
-plt.legend()
-plt.grid(True)
+plt.ylabel('z [m]')
+plt.title(f'Borehole T(t,z) - try 1, t_off={t_off_values[0]:.0f}')
 plt.tight_layout()
 plt.show()
