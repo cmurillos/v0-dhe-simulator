@@ -5,23 +5,21 @@ dhe_simulator
 Thermal simulation of Downhole Heat Exchangers (DHE) using FEM
 on cylindrical meshes with experimentally-derived physical fields.
 
-Public API
-----------
-DHE_simulation : Main simulation class.
-
 Usage
 -----
     from dhe_simulator import DHE_simulation
 
     sim = DHE_simulation(
         csv="physical_properties.csv",
-        R_min=0.05, R_max=0.10,
-        z_min=50, z_max=500,
+        rad_borehole=0.1, rad_simulation=100,
+        time_on=600000, time_off=1000000, time_final=2000000,
+        dt=20000, time_save=80000, tries=5,
     )
-    results = sim.solve(dt=1.0, t_save=10, t_on=0, t_off=3600, tf=7200, T_c=...)
+    times, T_layers = sim.run()
+    # T_layers[n] has shape (tries, n_times) for layer n
 """
 
-from .dhe_simulation import DHE_simulation, DHEResult
+from .dhe_simulation import DHE_simulation
 
-__all__ = ["DHE_simulation", "DHEResult"]
+__all__ = ["DHE_simulation"]
 __version__ = "0.1.0"
