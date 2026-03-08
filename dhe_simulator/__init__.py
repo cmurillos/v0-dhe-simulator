@@ -11,12 +11,15 @@ Usage
 
     sim = DHE_simulation(
         csv="physical_properties.csv",
-        rad_borehole=0.1, rad_simulation=100,
+        rad_borehole=1.0, rad_simulation=100,
+        deep_borehole=150,
         time_on=600000, time_off=1000000, time_final=2000000,
-        dt=20000, time_save=80000, tries=5,
+        dt=20000, time_save=80000, T_c=300, tries=5,
     )
-    times, T_layers = sim.run()
-    # T_layers[n] has shape (tries, n_times) for layer n
+    times, T = sim.run()
+    # times: (n_times,)
+    # T: (tries, n_times, n_nodes) - full temperature field
+    # sim.nodes: (n_nodes, 3) - mesh coordinates for reconstruction
 """
 
 from .dhe_simulation import DHE_simulation
