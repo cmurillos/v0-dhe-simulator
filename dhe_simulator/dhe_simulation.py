@@ -35,8 +35,6 @@ class DHE_simulation:
         Snapshot save interval.
     T_c : float
         Boundary temperature for Robin condition.
-    tries : int
-        Number of random field realizations.
     nr, nz, ntheta : int
         Mesh resolution (radial, axial, angular).
     alpha : float
@@ -45,7 +43,7 @@ class DHE_simulation:
 
     def __init__(self, csv, rad_borehole, rad_simulation, deep_borehole,
                  time_on, time_off, time_final,
-                 dt, time_save, T_c, tries,
+                 dt, time_save, T_c,
                  nr=10, nz=20, ntheta=15, alpha=0.01):
 
         self.csv = csv
@@ -58,11 +56,7 @@ class DHE_simulation:
         self.dt = dt
         self.t_save = time_save
         self.T_c_val = T_c
-        self.tries = tries
         self.alpha = alpha
-        self.nr = nr
-        self.nz = nz
-        self.ntheta = ntheta
 
         # Extract z_max from CSV
         df = pd.read_csv(csv)
@@ -73,7 +67,7 @@ class DHE_simulation:
         R_range = np.linspace(rad_borehole, rad_simulation, nr)
         Z_range = np.linspace(0, self.z_max, nz)
         self.cylinder = CylinderMesh(R_range, Z_range, self.z_min, ntheta)
-        self.nodes = self.cylinder.nodes  # expose for reconstruction
+        self.nodes = self.cylinder.nodes
         self.elements = self.cylinder.elements
         print(f"({self.nodes.shape[0]} nodes)")
 
@@ -96,62 +90,48 @@ class DHE_simulation:
         T0 = np.array([gen.T(*pt) for pt in self._solver.skfem_nodes])
         return p, c, k, T0
 
-    def run(self):
+    def run(self, output="simulation"):
         """
-        Run the simulation for all tries.
+        Run the simulation and export to XDMF + HDF5.
+
+        Parameters
+        ----------
+        output : str
+            Base filename for output (creates output.xdmf + output.h5)
 
         Returns
         -------
-        times : ndarray (n_times,)
-        T : ndarray (tries, n_times, n_nodes)
-            Full temperature field at each node and time for each try.
+        str : path to the .xdmf file
         """
-        times_ref = None
-        all_T = []  # list of (n_times, n_nodes) per try
-
         T_c_func = lambda t, x, y, z: np.full_like(x, self.T_c_val)
 
-        for tr in range(self.tries):
-            print(f"\n[DHE] === Try {tr+1}/{self.tries} ===")
+        # Generate fields
+        print("[DHE] Generating fields ...", end=" ", flush=True)
+        p, c, k, T0 = self._get_fields()
+        print("done")
 
-            # Generate new random fields
-            print("[DHE] Generating fields ...", end=" ", flush=True)
-            p, c, k, T0 = self._get_fields()
-            print("done")
+        # Assemble FEM system
+        print("[DHE] Assembling ...", end=" ", flush=True)
+        self._solver.assemble_system(p, c, k, self.alpha, self.R_min, 0.1)
+        print("done")
 
-            # Assemble FEM system
-            print("[DHE] Assembling ...", end=" ", flush=True)
-            self._solver.assemble_system(p, c, k, self.alpha, self.R_min, 0.1)
-            print("done")
+        # Stabilize
+        print("[DHE] Stabilizing ...")
+        T0_stable, n_iter = self._solver.stabilize(T0, self.dt)
 
-            # Stabilize
-            print("[DHE] Stabilizing ...", end=" ", flush=True)
-            T0_stable, n_iter = self._solver.stabilize(T0, self.dt)
-            print(f"{n_iter} iters")
+        # Solve
+        print("[DHE] Solving ...")
+        results = self._solver.solve(
+            T0=T0_stable,
+            dt=self.dt,
+            tf=self.tf,
+            t_save=self.t_save,
+            T_c_func=T_c_func,
+            t_on=self.t_on,
+            t_off=self.t_off
+        )
 
-            # Solve
-            print("[DHE] Solving ...")
-            raw = self._solver.solve(
-                T0=T0_stable,
-                dt=self.dt,
-                tf=self.tf,
-                t_save=self.t_save,
-                T_c_func=T_c_func,
-                t_on=self.t_on,
-                t_off=self.t_off
-            )
+        # Export to XDMF
+        self._solver.export_xdmf(results, output)
 
-            if times_ref is None:
-                times_ref = np.asarray(raw["t"], dtype=float)
-
-            # Stack all snapshots: (n_times, n_nodes)
-            T_matrix = np.vstack([np.asarray(Ti).ravel() for Ti in raw["T"]])
-            all_T.append(T_matrix)
-
-        # Stack all tries: (tries, n_times, n_nodes)
-        T_tensor = np.array(all_T)
-
-        print(f"\n[DHE] Done. Shape: {T_tensor.shape} "
-              f"(tries, times, nodes)")
-
-        return times_ref, T_tensor
+        return f"{output}.xdmf"

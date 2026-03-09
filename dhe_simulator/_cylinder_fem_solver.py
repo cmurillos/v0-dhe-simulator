@@ -378,3 +378,55 @@ class CylinderFEMSolver:
         sys.stdout.write("\n")
         sys.stdout.flush()
         return results
+
+    def export_xdmf(self, results, filename="output"):
+        """
+        Export simulation results to XDMF + HDF5 format.
+        Creates filename.xdmf and filename.h5
+        """
+        import h5py
+
+        times = results["t"]
+        T_list = results["T"]
+        n_times = len(times)
+        n_nodes = len(T_list[0])
+        n_cells = self.mesh.nelements
+
+        h5_path = f"{filename}.h5"
+        xdmf_path = f"{filename}.xdmf"
+
+        # Write HDF5
+        with h5py.File(h5_path, "w") as h5:
+            # Mesh data
+            h5.create_dataset("nodes", data=self.mesh.p.T)  # (n_nodes, 3)
+            h5.create_dataset("cells", data=self.mesh.t.T)  # (n_cells, 4)
+            # Temperature at each time
+            for i, T in enumerate(T_list):
+                h5.create_dataset(f"T_{i}", data=np.asarray(T).ravel())
+
+        # Write XDMF
+        xdmf = ['<?xml version="1.0"?>',
+                '<Xdmf Version="3.0">',
+                '<Domain>',
+                '<Grid Name="TimeSeries" GridType="Collection" CollectionType="Temporal">']
+
+        for i, t in enumerate(times):
+            xdmf.append(f'  <Grid Name="mesh" GridType="Uniform">')
+            xdmf.append(f'    <Time Value="{t}"/>')
+            xdmf.append(f'    <Topology TopologyType="Tetrahedron" NumberOfElements="{n_cells}">')
+            xdmf.append(f'      <DataItem Dimensions="{n_cells} 4" Format="HDF">{h5_path}:/cells</DataItem>')
+            xdmf.append(f'    </Topology>')
+            xdmf.append(f'    <Geometry GeometryType="XYZ">')
+            xdmf.append(f'      <DataItem Dimensions="{n_nodes} 3" Format="HDF">{h5_path}:/nodes</DataItem>')
+            xdmf.append(f'    </Geometry>')
+            xdmf.append(f'    <Attribute Name="Temperature" AttributeType="Scalar" Center="Node">')
+            xdmf.append(f'      <DataItem Dimensions="{n_nodes}" Format="HDF">{h5_path}:/T_{i}</DataItem>')
+            xdmf.append(f'    </Attribute>')
+            xdmf.append(f'  </Grid>')
+
+        xdmf.extend(['</Grid>', '</Domain>', '</Xdmf>'])
+
+        with open(xdmf_path, "w") as f:
+            f.write("\n".join(xdmf))
+
+        print(f"[export] Wrote {xdmf_path} + {h5_path}")
